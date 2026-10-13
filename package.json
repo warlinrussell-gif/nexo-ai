@@ -1,0 +1,125 @@
+{
+  "name": "nexo-ai",
+  "productName": "Nexo AI",
+  "version": "1.1.2",
+  "description": "Nexo AI - Estudio de IA local y en la nube con agentes, MCP, skills, control del PC, navegador y voz.",
+  "author": "Nexo AI",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/main/main.js",
+  "scripts": {
+    "dev": "vite build && electron .",
+    "build:renderer": "vite build",
+    "start": "electron .",
+    "test:core": "node scripts/test-core.mjs",
+    "catalog": "node scripts/build-catalog.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "dist:win": "vite build && node scripts/build-installer.mjs",
+    "dist:linux": "vite build && electron-builder --linux AppImage --x64 --publish never",
+    "dist:mac": "vite build && electron-builder --mac dmg --publish never",
+    "dist:win:dir": "vite build && electron-builder --win dir --x64 --publish never"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "extract-zip": "^2.0.1",
+    "tar": "^7.5.22"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@vitejs/plugin-react": "^6.1.1",
+    "dompurify": "^3.4.16",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "highlight.js": "^11.12.0",
+    "lucide-react": "^1.48.0",
+    "marked": "^18.0.14",
+    "png-to-ico": "^3.0.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "resedit": "^3.1.0",
+    "vite": "^8.3.1",
+    "zustand": "^5.0.15"
+  },
+  "build": {
+    "appId": "ai.nexo.studio",
+    "productName": "Nexo AI",
+    "copyright": "Nexo AI",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/main/**/*",
+      "src/shared/**/*",
+      "resources/**/*",
+      "dist/renderer/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "resources/**/*"
+    ],
+    "afterPack": "scripts/after-pack.cjs",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false,
+      "executableName": "NexoAI"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Nexo AI",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "include": "build/installer.nsh",
+      "artifactName": "NexoAI-Setup-${version}.exe",
+      "language": "3082",
+      "installerLanguages": [
+        "es_ES",
+        "en_US"
+      ],
+      "multiLanguageInstaller": false
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "build/icon.png",
+      "category": "Utility"
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.productivity"
+    },
+    "electronLanguages": [
+      "es",
+      "es-419",
+      "en-US",
+      "en-GB",
+      "pt-BR",
+      "pt-PT",
+      "fr",
+      "de",
+      "it",
+      "ca"
+    ]
+  }
+}
