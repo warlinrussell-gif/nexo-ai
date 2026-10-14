@@ -210,8 +210,11 @@ export function recommendContext(meta, budget, opts = {}) {
   }));
   const usable = options.filter((o) => o.ctx <= cap);
   const best = (kv, test) => usable.filter((o) => test(o[kv])).pop();
-  const gpuF16 = best('f16', (p) => p.fits && p.mode === 'gpu');
-  const gpuQ8 = best('q8_0', (p) => p.fits && p.mode === 'gpu');
+  // Margen para la elección automática: Windows, el escritorio y otras apps también usan VRAM. Si se llena,
+  // el controlador desborda a memoria compartida y la generación cae ~20x (medido: 3 tok/s frente a 55).
+  const safe = (p) => p.fits && p.mode === 'gpu' && (!budget.vram || p.gpuBytes <= budget.vram * 0.92);
+  const gpuF16 = best('f16', safe);
+  const gpuQ8 = best('q8_0', safe);
   let pick;
   // El máximo que el modelo soporta quedándose 100% en GPU; Q8_0 solo si permite más contexto
   if (gpuQ8 && (!gpuF16 || gpuQ8.ctx > gpuF16.ctx)) pick = { ctx: gpuQ8.ctx, kvType: 'q8_0', plan: gpuQ8.q8_0, reason: `Con la caché en Q8_0 cabe entero en la GPU con ${gpuQ8.ctx.toLocaleString('es-ES')} tokens (pérdida de calidad mínima).` };

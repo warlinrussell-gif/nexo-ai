@@ -6,7 +6,7 @@
 
 **Tu estudio de IA de escritorio: modelos locales y en la nube, agentes que usan tu PC, MCP, skills, navegador y voz — todo en una sola app.**
 
-![Version](https://img.shields.io/badge/versión-1.4.0-d97757)
+![Version](https://img.shields.io/badge/versión-1.4.1-d97757)
 ![Platform](https://img.shields.io/badge/plataforma-Windows%20%7C%20Linux%20%7C%20macOS-blue)
 ![Electron](https://img.shields.io/badge/Electron-React%20%2B%20Vite-47848F?logo=electron)
 ![llama.cpp](https://img.shields.io/badge/motor-llama.cpp-black)
