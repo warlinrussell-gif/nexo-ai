@@ -6,7 +6,7 @@ import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { activeLlama } from './runtimes.js';
 import { freePort, sleep, isWin, run } from './util.js';
-import { planModel, staticBudget, GiB, MiB } from '../shared/fit.js';
+import { planModel, recommendContext, staticBudget, GiB, MiB } from '../shared/fit.js';
 
 class LlamaManager extends EventEmitter {
   constructor() {
@@ -59,11 +59,22 @@ class LlamaManager extends EventEmitter {
   async planFor(model, opts = {}) {
     const s = this.getSettings();
     const ms = model.settings || {};
-    const ctx = opts.ctx || ms.ctx || s.ctx || 8192;
     const b = await this.budget(model.id);
     const mmSize = model.mmproj && ms.vision !== false ? safeSize(model.mmproj) : 0;
     const manual = ms.gpuLayers !== undefined && ms.gpuLayers !== 'auto' && ms.gpuLayers !== '' ? Number(ms.gpuLayers) : undefined;
-    return planModel(model.meta, b, { ctx, kvType: ms.kvType || s.kvType || 'f16', mmprojSize: mmSize, fileSize: model.size, gpuLayers: manual });
+    const auto = this.isAutoCtx(model) && !opts.ctx;
+    const rec = auto ? recommendContext(model.meta, b, { fileSize: model.size, mmprojSize: mmSize }) : null;
+    const ctx = rec ? rec.ctx : (opts.ctx || ms.ctx || s.ctx || 8192);
+    const kvType = rec ? rec.kvType : (ms.kvType || s.kvType || 'f16');
+    const plan = planModel(model.meta, b, { ctx, kvType, mmprojSize: mmSize, fileSize: model.size, gpuLayers: manual });
+    return { ...plan, kvType, autoCtx: !!rec, reason: rec?.reason };
+  }
+
+  // Contexto automático salvo que el usuario lo haya fijado a mano para este modelo
+  isAutoCtx(model) {
+    const ms = model.settings || {};
+    if (ms.ctxMode) return ms.ctxMode === 'auto';
+    return this.getSettings().autoCtx !== false;
   }
 
   async ensureLoaded(model, opts = {}) {
@@ -73,13 +84,15 @@ class LlamaManager extends EventEmitter {
     if (inst?.status === 'error') this.instances.delete(model.id);
     const s = this.getSettings();
     let plan = await this.planFor(model, opts);
-    if (!plan.fits && s.autoSwap !== false) {
+    // En contexto automático, liberar la GPU de modelos inactivos para darle al nuevo su máximo
+    const wantsGpu = plan.autoCtx && plan.mode !== 'gpu';
+    if ((!plan.fits || wantsGpu) && s.autoSwap !== false) {
       // descargar modelos inactivos por orden de último uso hasta que quepa
       const idle = [...this.instances.values()].filter((i) => !i.busy && i.id !== model.id).sort((a, b) => a.lastUsed - b.lastUsed);
       for (const i of idle) {
         await this.stop(i.id);
         plan = await this.planFor(model, opts);
-        if (plan.fits) break;
+        if (plan.fits && !(plan.autoCtx && plan.mode !== 'gpu')) break;
       }
     }
     if (!plan.fits) {
@@ -112,7 +125,7 @@ class LlamaManager extends EventEmitter {
     if (has('--jinja')) args.push('--jinja');
     if (model.mmproj && ms.vision !== false && has('--mmproj')) args.push('--mmproj', model.mmproj);
     if (has('--no-webui')) args.push('--no-webui');
-    const kvType = ms.kvType || s.kvType || 'f16';
+    const kvType = plan.kvType || ms.kvType || s.kvType || 'f16';
     if (kvType !== 'f16' && has('--cache-type-k')) {
       args.push('--cache-type-k', kvType, '--cache-type-v', kvType);
       if (has('--flash-attn')) args.push('--flash-attn', 'on');

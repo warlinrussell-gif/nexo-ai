@@ -21,13 +21,94 @@ function hfHeaders() { const t = hfTokenGetter(); return t ? { Authorization: `B
 export function getCatalog() {
   if (!catalog) {
     try { catalog = require('./catalog-data.json'); } catch { catalog = { models: [] }; }
-    // catálogo actualizado en caché (si existe y es más nuevo)
+    // catálogo actualizado en caché (si existe y es más nuevo); los modelos descubiertos se conservan siempre
     try {
       const cached = readJSON(dir('cache', 'catalog-live.json'), null);
       if (cached?.models?.length && new Date(cached.generated) > new Date(catalog.generated)) catalog = cached;
+      else if (cached?.models?.length) {
+        const have = new Set(catalog.models.map((m) => normName(m.repo)));
+        catalog = { ...catalog, models: [...catalog.models, ...cached.models.filter((m) => m.auto && !have.has(normName(m.repo)))] };
+      }
     } catch { }
   }
   return catalog;
+}
+
+// ───────────── Novedades: detectar modelos recién lanzados ─────────────
+const NEW_SOURCES = ['unsloth', 'lmstudio-community', 'ggml-org', 'bartowski'];
+const NOT_LLM = /text-to-image|image-to-video|text-to-video|text-to-speech|image-to-image|feature-extraction|sentence-similarity|automatic-speech|audio|object-detection|token-classification/;
+const NOT_LLM_NAME = /embed|rerank|qwen-image|[-_]image|tts|whisper|ltx|flux|wan2|vae|diffusion|speech|audio/i;
+
+/** Nombre base comparable entre publicadores ("bartowski/NousResearch_Hermes-4-14B-GGUF" → "hermes414b"). */
+export function normName(s = '') {
+  return s.toLowerCase().split('/').pop().replace(/[-_]gguf$/, '').replace(/^[^_]+_/, '').replace(/[-_](instruct|it|chat)$/, '').replace(/[^a-z0-9]/g, '');
+}
+
+function autoDesc(d, created) {
+  const parts = [];
+  if (d.caps.includes('code')) parts.push('orientado a programación');
+  if (d.caps.includes('computer')) parts.push('controla el PC');
+  if (d.caps.includes('vision')) parts.push('ve imágenes');
+  if (d.caps.includes('tools')) parts.push('usa herramientas');
+  if (d.caps.includes('reasoning')) parts.push('razona');
+  if (d.caps.includes('moe')) parts.push('MoE (rápido para su tamaño)');
+  const when = created ? new Date(created).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' }) : '';
+  return `Novedad${when ? ` del ${when}` : ''} publicada por ${d.publisher}${parts.length ? ': ' + parts.join(', ') : ''}.`;
+}
+
+/** Busca en Hugging Face modelos de texto nuevos y populares y los añade al catálogo. */
+export async function discoverNewModels({ max = 10, days = 120 } = {}) {
+  const cat = getCatalog();
+  const known = new Set(cat.models.flatMap((m) => [normName(m.repo), normName(m.name)]));
+  const q = 'filter=gguf&sort=createdAt&limit=40&expand[]=createdAt&expand[]=downloads&expand[]=likes&expand[]=pipeline_tag&expand[]=gguf';
+  const lists = await Promise.all(NEW_SOURCES.map((a) => hfJSON(`${HF}/api/models?author=${a}&${q}`).catch(() => [])));
+  const cutoff = Date.now() - days * 864e5;
+  const cands = [];
+  for (const m of lists.flat()) {
+    const key = normName(m.id);
+    if (known.has(key) || cands.some((c) => c.key === key)) continue;
+    if (NOT_LLM.test(m.pipeline_tag || '') || NOT_LLM_NAME.test(m.id)) continue;
+    const total = m.gguf?.total || 0;
+    if (total < 0.5e9 || total > 400e9 || new Date(m.createdAt).getTime() < cutoff) continue; // >400B: inviable en local
+    // bartowski publica muchos afinados: exigir más popularidad que a los publicadores "oficiales"
+    const pop = (m.likes || 0) * 300 + (m.downloads || 0);
+    if (pop < (m.id.startsWith('bartowski/') ? 8000 : 600)) continue;
+    cands.push({ key, m, pop });
+  }
+  cands.sort((a, b) => b.pop - a.pop);
+  const added = [];
+  let failed = 0;
+  for (const { m } of cands.slice(0, max)) {
+    try {
+      const d = await repoDetails(m.id);
+      if (!d.quants?.length) continue;
+      const caps = new Set(d.caps);
+      if (/coder|devstral|codestral|[-_]code/i.test(m.id)) caps.add('code');
+      if (/fara|ui-tars|ui-mate|computer-use|gui-?agent/i.test(m.id)) caps.add('computer');
+      const entry = {
+        id: d.repo, repo: d.repo, name: d.name.replace(/^[^_]+_/, ''), publisher: d.publisher, tags: ['nuevo'], caps: [...caps],
+        params: d.params, arch: d.arch, ctx: d.ctx, downloads: d.downloads, likes: d.likes, updated: d.updated, license: d.license,
+        recommended: d.recommended, quants: d.quants, mmproj: d.mmproj, meta: d.meta, auto: true, added: new Date().toISOString()
+      };
+      entry.desc = autoDesc(entry, m.createdAt);
+      added.push(entry);
+    } catch (e) { failed++; console.error('discover', m.id, e.message); } // repo inaccesible o sin GGUF legible
+  }
+  // Si Hugging Face falla con todos, no se da por revisado: se reintenta en la próxima comprobación
+  const hfDown = failed > 0 && !added.length && failed >= Math.min(max, cands.length);
+  const state = { lastDiscover: hfDown ? lastDiscover() : new Date().toISOString(), lastAdded: added.map((a) => a.name) };
+  if (!hfDown) try { writeJSONAtomic(dir('cache', 'catalog-discover.json'), state); } catch { }
+  if (hfDown) throw new Error('Hugging Face no responde ahora mismo (error del servidor). Nexo lo volverá a intentar más tarde.');
+  if (added.length) {
+    catalog = { generated: new Date().toISOString(), models: [...cat.models, ...added] };
+    try { writeJSONAtomic(dir('cache', 'catalog-live.json'), catalog); } catch { }
+  }
+  return { added: added.map((a) => a.name), checked: cands.length, ...state };
+}
+
+/** Fecha de la última búsqueda de novedades. */
+export function lastDiscover() {
+  return readJSON(dir('cache', 'catalog-discover.json'), {}).lastDiscover || null;
 }
 
 async function hfJSON(url) {

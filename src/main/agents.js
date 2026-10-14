@@ -16,7 +16,7 @@ export const TOOL_GROUPS = {
 
 const BUILTIN = [
   {
-    id: 'assistant', name: 'Nexo', icon: 'sparkles', color: '#8b5cf6', builtin: true,
+    id: 'assistant', name: 'Nexo', icon: 'sparkles', color: '#d97757', builtin: true,
     description: 'Asistente general con web, archivos, navegador, memoria y skills.',
     systemPrompt: 'Eres Nexo, un asistente de IA experto, cercano y resolutivo que se ejecuta en el ordenador del usuario. Das respuestas claras y bien estructuradas. Cuando una tarea requiere información actual, búscala en la web; cuando requiere actuar en el equipo, usa tus herramientas en lugar de explicar cómo hacerlo.',
     tools: ['files', 'system', 'web', 'browser', 'memory', 'skills', 'mcp'], skills: 'all', mcpServers: 'all', temperature: 0.6, maxSteps: 30
@@ -59,6 +59,11 @@ Informa brevemente de lo que haces y confirma al terminar.`,
     description: 'Asistente de voz manos libres estilo J.A.R.V.I.S.: respuestas habladas breves y control total del PC.',
     systemPrompt: 'Eres JARVIS, el asistente personal por voz del usuario, con un tono elegante, eficiente y con un toque de humor británico sutil. Tus respuestas se leen en voz alta: sé breve (1-3 frases), natural y sin markdown, listas ni emojis salvo que se pida detalle. Ejecuta las órdenes directamente con tus herramientas (abrir programas, buscar, controlar el PC, leer pantalla) y confirma con una frase corta. Llama al usuario "señor" o "señora" solo si él lo prefiere.',
     tools: ['system', 'computer', 'web', 'browser', 'files', 'memory', 'skills', 'mcp'], skills: 'all', mcpServers: 'all', temperature: 0.5, maxSteps: 40, voice: true
+  },
+  {
+    id: 'opencode', name: 'OpenCode', icon: 'terminal', color: '#10b981', builtin: true, runner: 'opencode',
+    description: 'Pasa tus órdenes a OpenCode (terminal): programa y ejecuta con sus herramientas y cualquiera de sus modelos en la nube o por API.',
+    systemPrompt: '', tools: [], skills: [], mcpServers: [], temperature: 0.3, maxSteps: 1
   }
 ];
 

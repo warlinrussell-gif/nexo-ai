@@ -129,6 +129,28 @@ export async function screenshot({ maxWidth = 1366, displayId, quality = 80 } = 
   return { data: jpeg.toString('base64'), mime: 'image/jpeg', width: s2.width, height: s2.height, screenW: info.physW, screenH: info.physH };
 }
 
+/** Amplía una zona de la última captura a resolución real (no cambia el sistema de coordenadas de los clics). */
+export async function zoom({ x, y, x2, y2, maxWidth = 1366 } = {}) {
+  if (!lastShot) throw new Error('Haz primero una captura (screenshot) para saber qué zona ampliar');
+  if ([x, y, x2, y2].some((v) => typeof v !== 'number' || Number.isNaN(v))) throw new Error('Indica la zona con x, y, x2, y2 (coordenadas de la última captura)');
+  const info = displayInfo();
+  const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: info.physW, height: info.physH } });
+  const src = sources.find((s) => String(s.display_id) === String(info.d.id)) || sources[0];
+  if (!src) throw new Error('No se pudo capturar la pantalla');
+  const full = src.thumbnail;
+  const fsz = full.getSize();
+  const kx = fsz.width / lastShot.imgW, ky = fsz.height / lastShot.imgH;
+  const rx = Math.max(0, Math.round(Math.min(x, x2) * kx)), ry = Math.max(0, Math.round(Math.min(y, y2) * ky));
+  const rw = Math.min(fsz.width - rx, Math.round(Math.abs(x2 - x) * kx)), rh = Math.min(fsz.height - ry, Math.round(Math.abs(y2 - y) * ky));
+  if (rw < 8 || rh < 8) throw new Error('La zona es demasiado pequeña');
+  let img = full.crop({ x: rx, y: ry, width: rw, height: rh });
+  // zonas pequeñas se amplían para que el texto sea legible; las grandes se limitan
+  if (rw < 700) img = img.resize({ width: Math.min(1200, rw * 2), quality: 'best' });
+  else if (rw > maxWidth) img = img.resize({ width: maxWidth, quality: 'best' });
+  const s = img.getSize();
+  return { data: img.toJPEG(90).toString('base64'), mime: 'image/jpeg', width: s.width, height: s.height };
+}
+
 function toPhys(x, y) {
   if (!lastShot) { const i = displayInfo(); lastShot = { imgW: i.physW, imgH: i.physH, physW: i.physW, physH: i.physH, originX: i.originX, originY: i.originY }; }
   const px = Math.round(lastShot.originX + (Number(x) * lastShot.physW) / lastShot.imgW);

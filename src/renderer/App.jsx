@@ -11,14 +11,12 @@ import McpView from './views/McpView.jsx';
 import HardwareView from './views/HardwareView.jsx';
 import SettingsView from './views/SettingsView.jsx';
 import Setup from './views/Setup.jsx';
+import Sidebar from './components/Sidebar.jsx';
 import ApprovalModal from './components/ApprovalModal.jsx';
+import QuestionModal from './components/QuestionModal.jsx';
 import CommandPalette from './components/CommandPalette.jsx';
 import VoiceController, { JarvisPill } from './components/Voice.jsx';
 import { staticBudget } from '../shared/fit.js';
-
-const NAV = [
-  ['chat', 'Chat', 'chat'], ['models', 'Modelos', 'models'], ['agents', 'Agentes', 'bot'], ['skills', 'Skills', 'skills'], ['mcp', 'MCP', 'plug'], ['hardware', 'Equipo', 'cpu']
-];
 
 function Meters() {
   const { instances, hw } = useStore();
@@ -86,7 +84,7 @@ function Toasts() {
 }
 
 export default function App() {
-  const { info, view, setView, settings, setupActive } = useStore();
+  const { info, view, setView, settings, setupActive, sidebarOpen } = useStore();
   const isMac = nexo.platform === 'darwin';
 
   useEffect(() => {
@@ -109,7 +107,7 @@ export default function App() {
   if (!info) return <div className="setup"><div className="orb" /></div>;
   const titlebar = (
     <div className={`titlebar ${isMac ? 'mac' : ''}`}>
-      <div className="brand"><div className="logo-mark" />Nexo AI</div>
+      {(!info.configured || setupActive) && <div className="brand"><div className="logo-mark" />Nexo AI</div>}
       <span className="spacer" />
       {info.configured && !setupActive && <button className="search-trigger no-drag" onClick={() => useStore.setState({ paletteOpen: true })}><Icon name="search" size={14} />Buscar o ejecutar…<kbd>Ctrl K</kbd></button>}
       <span className="spacer" />
@@ -123,18 +121,10 @@ export default function App() {
   if (!settings) return <div className="app">{titlebar}<div className="setup"><div className="orb" /></div></div>;
 
   return (
-    <div className="app">
+    <div className={`app ${sidebarOpen ? '' : 'side-mini'}`}>
       {titlebar}
       <div className="body">
-        <nav className="rail">
-          {NAV.map(([k, label, icon]) => (
-            <button key={k} className={`rail-btn ${view === k ? 'active' : ''}`} data-tip={label} onClick={() => setView(k)}><Icon name={icon} size={20} /></button>
-          ))}
-          <span className="grow" />
-          <button className="rail-btn" data-tip="Conversación por voz" onClick={() => window.dispatchEvent(new CustomEvent('nexo-voice', { detail: 'conversation' }))}><Icon name="audio-lines" size={20} /></button>
-          <button className="rail-btn" data-tip={settings.theme === 'light' ? 'Tema oscuro' : 'Tema claro'} onClick={async () => { const n = await useStore.getState().saveSettings({ theme: settings.theme === 'light' ? 'dark' : 'light' }); call('app.setTheme', n.theme); }}><Icon name={settings.theme === 'light' ? 'moon' : 'sun'} size={19} /></button>
-          <button className={`rail-btn ${view === 'settings' ? 'active' : ''}`} data-tip="Ajustes" onClick={() => setView('settings')}><Icon name="settings" size={20} /></button>
-        </nav>
+        <Sidebar />
         <main className="main">
           <div className="view" style={{ display: view === 'chat' ? 'flex' : 'none' }}><ChatView /></div>
           {view === 'models' && <div className="view"><ModelsView /></div>}
@@ -146,6 +136,7 @@ export default function App() {
         </main>
       </div>
       <ApprovalModal />
+      <QuestionModal />
       <CommandPalette />
       <VoiceController />
       <Lightbox />

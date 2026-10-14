@@ -7,7 +7,7 @@ import ModelPicker from '../components/ModelPicker.jsx';
 import { DownloadRow } from './ModelsView.jsx';
 import { getSpeaker } from '../components/Voice.jsx';
 
-const ACCENTS = ['#8b5cf6', '#6366f1', '#3b82f6', '#06b6d4', '#14b8a6', '#22c55e', '#f59e0b', '#f97316', '#ef4444', '#ec4899'];
+const ACCENTS = ['#d97757', '#c96442', '#8b5cf6', '#6366f1', '#3b82f6', '#06b6d4', '#14b8a6', '#22c55e', '#f59e0b', '#ef4444', '#ec4899'];
 
 function General() {
   const { settings, saveSettings, agents } = useStore();
@@ -316,8 +316,46 @@ function About() {
   );
 }
 
+function AgentSettings() {
+  const { settings: s, saveSettings, toast } = useStore();
+  const oc = s.opencode || {};
+  const [st, setSt] = useState(null);
+  const [hooksText, setHooksText] = useState(JSON.stringify(s.hooks || [], null, 2));
+  const [hooksErr, setHooksErr] = useState(null);
+  useEffect(() => { call('opencode.status').then(setSt).catch(() => setSt({ installed: false })); }, [oc.path]);
+  const saveHooks = () => {
+    try {
+      const v = JSON.parse(hooksText || '[]');
+      if (!Array.isArray(v)) throw new Error('Debe ser una lista [...]');
+      for (const h of v) if (!['before_tool', 'after_tool', 'stop'].includes(h.event) || !h.command) throw new Error('Cada hook necesita event (before_tool, after_tool o stop) y command');
+      saveSettings({ hooks: v }); setHooksErr(null); toast('Hooks guardados', 'success');
+    } catch (e) { setHooksErr(e.message); }
+  };
+  return (
+    <>
+      <h2>Agentes</h2>
+      <Setting title="Compactar automáticamente las conversaciones largas" desc="Cuando el contexto se llena, el modelo resume la parte antigua y sigue trabajando sin perder el hilo (como Claude Code)"><Toggle value={s.autoCompact !== false} onChange={(v) => saveSettings({ autoCompact: v })} /></Setting>
+      <div className="small muted" style={{ margin: '4px 0 14px' }}>Instrucciones de proyecto: si la carpeta de trabajo del chat (o una superior) tiene un archivo <code>AGENTS.md</code>, <code>NEXO.md</code> o <code>CLAUDE.md</code>, los agentes lo leen y lo siguen siempre. Elige la carpeta del proyecto con el icono de carpeta del compositor.</div>
+      <div className="section-title">OpenCode</div>
+      <div className="card row" style={{ marginBottom: 12 }}>
+        <Icon name="terminal" size={20} style={{ color: st?.installed ? 'var(--green)' : 'var(--amber)' }} />
+        <div className="grow">{st === null ? 'Comprobando…' : st.installed ? <><strong>OpenCode {st.version}</strong><div className="tiny muted mono">{st.path}</div></> : <><strong>OpenCode no encontrado</strong><div className="small muted">Instálalo con <code>npm i -g opencode-ai</code> o indica la ruta del ejecutable.</div></>}</div>
+      </div>
+      <Setting title="Ruta de OpenCode (opcional)" desc="Déjala vacía para detectarla automáticamente"><input className="input mono" style={{ width: 320 }} placeholder="Automático" defaultValue={oc.path || ''} onBlur={(e) => saveSettings({ opencode: { path: e.target.value.trim() } })} /></Setting>
+      <Setting title="Modelo predeterminado para OpenCode" desc="Modelo de la nube o por API, formato proveedor/modelo (p. ej. opencode/big-pickle). Vacío = el predeterminado de OpenCode. También se puede elegir en cada chat."><input className="input mono" style={{ width: 320 }} placeholder="Predeterminado de OpenCode" defaultValue={oc.model || ''} onBlur={(e) => saveSettings({ opencode: { model: e.target.value.trim() } })} /></Setting>
+      <Setting title="Aprobar automáticamente los permisos de OpenCode" desc="Con «Acceso total» siempre se aprueban. Actívalo para que OpenCode no se detenga en otros modos."><Toggle value={!!oc.autoApprove} onChange={(v) => saveSettings({ opencode: { autoApprove: v } })} /></Setting>
+      <Setting title="Usar REA (ingeniería inversa) en OpenCode" desc="Añade las ~170 herramientas de REA. Ojo: ocupan unos 70.000 tokens por mensaje (modo compact); úsalo con modelos de contexto grande. Los que no lo aceptan se reintentan sin REA."><Toggle value={oc.rea === true} onChange={(v) => saveSettings({ opencode: { rea: v } })} /></Setting>
+      <div className="section-title">Hooks</div>
+      <div className="small muted" style={{ marginBottom: 8 }}>Comandos de {navigator.platform.startsWith('Win') ? 'PowerShell' : 'shell'} que se ejecutan automáticamente. <code>before_tool</code>: antes de cada herramienta (si termina con código 2, la bloquea y el motivo se le pasa al modelo). <code>after_tool</code>: después (su salida se añade al resultado). <code>stop</code>: al terminar cada respuesta. Variables: NEXO_TOOL, NEXO_ARGS, NEXO_RESULT, NEXO_CHAT_ID, NEXO_WORKSPACE. <code>match</code> es una expresión regular sobre el nombre de la herramienta.</div>
+      <textarea className="textarea mono small" rows={8} value={hooksText} onChange={(e) => setHooksText(e.target.value)} placeholder={'[\n  { "event": "after_tool", "match": "write_file|edit_file", "command": "npx prettier --write $env:NEXO_WORKSPACE" }\n]'} />
+      {hooksErr && <div className="small" style={{ color: 'var(--red)', marginTop: 6 }}>{hooksErr}</div>}
+      <div className="row" style={{ marginTop: 8 }}><Button size="sm" variant="primary" onClick={saveHooks}>Guardar hooks</Button></div>
+    </>
+  );
+}
+
 const SECTIONS = [
-  ['general', 'General', 'settings'], ['providers', 'Proveedores API', 'key'], ['local', 'Modelos locales', 'disk'], ['permissions', 'Permisos y PC', 'shield-check'],
+  ['general', 'General', 'settings'], ['providers', 'Proveedores API', 'key'], ['local', 'Modelos locales', 'disk'], ['agents', 'Agentes y OpenCode', 'bot'], ['permissions', 'Permisos y PC', 'shield-check'],
   ['voice', 'Voz y JARVIS', 'audio-lines'], ['web', 'Web y tokens', 'globe'], ['memory', 'Memoria', 'brain'], ['storage', 'Almacenamiento', 'folder'], ['about', 'Acerca de', 'info']
 ];
 
@@ -335,6 +373,7 @@ export default function SettingsView() {
             {tab === 'general' && <General />}
             {tab === 'providers' && <Providers />}
             {tab === 'local' && <LocalSettings />}
+            {tab === 'agents' && <AgentSettings />}
             {tab === 'permissions' && <Permissions />}
             {tab === 'voice' && <VoiceSettings />}
             {tab === 'web' && <WebSettings />}

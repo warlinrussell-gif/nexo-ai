@@ -30,10 +30,10 @@ function shellCmd(command) {
   return [process.env.SHELL || '/bin/bash', ['-lc', command]];
 }
 
-function execCommand(command, { cwd, timeout = 120, signal }) {
+export function execCommand(command, { cwd, timeout = 120, signal, env }) {
   return new Promise((resolve) => {
     const [bin, args] = shellCmd(command);
-    const child = spawn(bin, args, { cwd, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
+    const child = spawn(bin, args, { cwd, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8', ...env } });
     let out = '', err = '', killed = false;
     child.stdout.on('data', (d) => { out += d.toString(); if (out.length > 2e6) out = out.slice(-1e6); });
     child.stderr.on('data', (d) => { err += d.toString(); if (err.length > 1e6) err = err.slice(-5e5); });
@@ -88,7 +88,7 @@ export function builtinTools(ctx) {
   // ─── Archivos ───
   add('files', 'read', 'read_file', 'Lee un archivo de texto (con números de línea) o una imagen (la verás). Usa offset/limit para archivos grandes.', {
     path: { type: 'string', description: 'Ruta absoluta o relativa al directorio de trabajo' }, offset: { type: 'integer', description: 'Línea inicial (1 = primera)' }, limit: { type: 'integer', description: 'Máximo de líneas (por defecto 400)' }
-  }, ['path'], async (a) => {
+  }, ['path'], async (a, c) => {
     const p = expand(a.path, cwdDefault());
     const st = await fsp.stat(p);
     if (st.isDirectory()) throw new Error('Es una carpeta; usa list_directory');
@@ -99,28 +99,54 @@ export function builtinTools(ctx) {
     if (buf.subarray(0, 8000).includes(0)) return `Archivo binario (${fmtSize(st.size)}). No se puede mostrar como texto.`;
     const lines = buf.toString('utf8').split('\n');
     const off = Math.max(1, a.offset || 1), lim = Math.min(2000, a.limit || 400);
-    const slice = lines.slice(off - 1, off - 1 + lim).map((l, i) => `${String(off + i).padStart(5)}| ${l.length > 2000 ? l.slice(0, 2000) + '…' : l}`).join('\n');
-    const more = lines.length > off - 1 + lim ? `\n\n[${lines.length} líneas en total; continúa con offset=${off + lim}]` : '';
+    const budget = Math.max(2000, (c?.maxChars || 1e9) - 300);
+    const out = [];
+    let used = 0;
+    for (let i = off - 1; i < Math.min(lines.length, off - 1 + lim); i++) {
+      const l = `${String(i + 1).padStart(5)}| ${lines[i].length > 2000 ? lines[i].slice(0, 2000) + '…' : lines[i]}`;
+      if (used + l.length + 1 > budget && out.length) break; // no cabe más en el contexto del modelo
+      out.push(l); used += l.length + 1;
+    }
+    const cut = out.length < Math.min(lim, lines.length - off + 1);
+    const lim2 = out.length;
+    const slice = out.join('\n');
+    // Si el modelo pidió un rango concreto no se le invita a seguir leyendo (los modelos pequeños entran en bucle)
+    const shown = `líneas ${off}-${off - 1 + lim2} de ${lines.length} en total`;
+    const more = cut ? `\n\n[${shown}. El resto no cabe en el contexto del modelo: pide otro rango con offset=${off + lim2} o busca el dato con search_files]`
+      : lines.length > off - 1 + lim2 ? (a.limit || a.offset ? `\n\n[${shown}]` : `\n\n[${shown}; si necesitas más, continúa con offset=${off + lim2}]`)
+      : (off > 1 ? `\n\n[${shown}]` : `\n\n[archivo completo: ${lines.length} líneas]`);
     return slice + more;
   });
   add('files', 'write', 'write_file', 'Crea o sobrescribe un archivo con el contenido indicado (crea carpetas si hace falta). Usa append=true para añadir al final.', {
     path: { type: 'string' }, content: { type: 'string' }, append: { type: 'boolean' }
-  }, ['path', 'content'], async (a) => {
+  }, ['path', 'content'], async (a, c) => {
     const p = expand(a.path, cwdDefault());
+    await c.checkpoint?.(p);
     await fsp.mkdir(path.dirname(p), { recursive: true });
     if (a.append) await fsp.appendFile(p, a.content); else await fsp.writeFile(p, a.content);
     return `Archivo ${a.append ? 'actualizado' : 'guardado'}: ${p} (${fmtSize(Buffer.byteLength(a.content))})`;
   });
   add('files', 'write', 'edit_file', 'Edita un archivo reemplazando un fragmento exacto de texto por otro. old_text debe ser único salvo que replace_all=true.', {
     path: { type: 'string' }, old_text: { type: 'string' }, new_text: { type: 'string' }, replace_all: { type: 'boolean' }
-  }, ['path', 'old_text', 'new_text'], async (a) => {
+  }, ['path', 'old_text', 'new_text'], async (a, c) => {
     const p = expand(a.path, cwdDefault());
     const txt = await fsp.readFile(p, 'utf8');
-    const count = txt.split(a.old_text).length - 1;
-    if (!count) throw new Error('old_text no se encontró en el archivo (revisa espacios y saltos de línea exactos)');
+    // tolerar finales de línea CRLF cuando el modelo envía LF
+    let oldT = a.old_text, newT = a.new_text;
+    if (!txt.includes(oldT) && txt.includes('\r\n') && oldT.includes('\n')) { oldT = oldT.replace(/\r?\n/g, '\r\n'); newT = newT.replace(/\r?\n/g, '\r\n'); }
+    const count = txt.split(oldT).length - 1;
+    if (!count) throw new Error('old_text no se encontró en el archivo (revisa espacios y saltos de línea exactos; usa read_file para copiar el texto actual)');
     if (count > 1 && !a.replace_all) throw new Error(`old_text aparece ${count} veces; añade más contexto o usa replace_all`);
-    await fsp.writeFile(p, a.replace_all ? txt.split(a.old_text).join(a.new_text) : txt.replace(a.old_text, () => a.new_text));
-    return `Editado ${p} (${a.replace_all ? count : 1} reemplazo/s)`;
+    await c.checkpoint?.(p);
+    const out = a.replace_all ? txt.split(oldT).join(newT) : txt.replace(oldT, () => newT);
+    await fsp.writeFile(p, out);
+    // fragmento resultante con números de línea para que el modelo verifique el cambio
+    const at = out.indexOf(newT);
+    const startLine = at >= 0 ? out.slice(0, at).split('\n').length : 1;
+    const lines = out.split('\n');
+    const from = Math.max(1, startLine - 3), to = Math.min(lines.length, startLine + newT.split('\n').length + 2);
+    const snippet = lines.slice(from - 1, to).map((l, i) => `${String(from + i).padStart(5)}| ${l.replace(/\r$/, '')}`).join('\n');
+    return `Editado ${p} (${a.replace_all ? count : 1} reemplazo/s). Resultado:\n${snippet}`;
   });
   add('files', 'read', 'list_directory', 'Lista el contenido de una carpeta (nombre, tipo, tamaño, fecha). depth>1 para ver subcarpetas.', {
     path: { type: 'string', description: 'Carpeta (por defecto: directorio de trabajo). Admite ~ y %VARIABLES%' }, depth: { type: 'integer' }
@@ -151,16 +177,19 @@ export function builtinTools(ctx) {
   });
   add('files', 'write', 'move_path', 'Mueve o renombra un archivo o carpeta. Con copy=true copia en vez de mover.', {
     from: { type: 'string' }, to: { type: 'string' }, copy: { type: 'boolean' }
-  }, ['from', 'to'], async (a) => {
+  }, ['from', 'to'], async (a, c) => {
     const f = expand(a.from, cwdDefault()), t = expand(a.to, cwdDefault());
+    if (!a.copy) await c.checkpoint?.(f);
+    await c.checkpoint?.(t);
     await fsp.mkdir(path.dirname(t), { recursive: true });
     if (a.copy) await fsp.cp(f, t, { recursive: true }); else await fsp.rename(f, t).catch(async () => { await fsp.cp(f, t, { recursive: true }); await fsp.rm(f, { recursive: true, force: true }); });
     return `${a.copy ? 'Copiado' : 'Movido'}: ${f} → ${t}`;
   });
   add('files', 'exec', 'delete_path', 'Elimina un archivo o carpeta (a la papelera por defecto).', {
     path: { type: 'string' }, permanent: { type: 'boolean', description: 'true = borrar definitivamente sin papelera' }
-  }, ['path'], async (a) => {
+  }, ['path'], async (a, c) => {
     const p = expand(a.path, cwdDefault());
+    await c.checkpoint?.(p);
     if (a.permanent) await fsp.rm(p, { recursive: true, force: true }); else await shell.trashItem(p);
     return `Eliminado ${a.permanent ? 'definitivamente' : '(a la papelera)'}: ${p}`;
   });
@@ -175,9 +204,11 @@ export function builtinTools(ctx) {
       const log = path.join(dir('logs'), `bg-${uid()}.log`);
       const fd = fs.openSync(log, 'a');
       const child = spawn(bin, args, { cwd, detached: !isWin, windowsHide: true, stdio: ['ignore', fd, fd] });
-      bgProcs.set(child.pid, { command: a.command, log });
+      const info = { command: a.command, log, running: true };
+      bgProcs.set(child.pid, info);
+      child.on('exit', (code) => { info.running = false; info.code = code; });
       child.unref();
-      return `Proceso en segundo plano iniciado (PID ${child.pid}). Registro: ${log}`;
+      return `Proceso en segundo plano iniciado (PID ${child.pid}). Lee su salida con process_output(pid=${child.pid}).`;
     }
     const r = await execCommand(a.command, { cwd, timeout: Math.min(1800, a.timeout_seconds || 120), signal: c.signal });
     let out = '';
@@ -233,6 +264,17 @@ export function builtinTools(ctx) {
     if (r.code) throw new Error(r.err || 'No se pudo terminar');
     return 'Proceso terminado';
   });
+  add('system', 'read', 'process_output', 'Lee la salida (últimas líneas) de un proceso lanzado con run_command background=true. Sin pid, lista los procesos en segundo plano.', {
+    pid: { type: 'integer' }, lines: { type: 'integer', description: 'Últimas N líneas (por defecto 80)' }
+  }, [], async (a) => {
+    if (!a.pid) return bgProcs.size ? [...bgProcs.entries()].map(([pid, p]) => `PID ${pid} · ${p.running === false ? 'terminado' : 'en marcha'} · ${p.command}`).join('\n') : 'No hay procesos en segundo plano lanzados en esta sesión';
+    const p = bgProcs.get(Number(a.pid));
+    if (!p) throw new Error('No hay un proceso en segundo plano con ese PID (usa process_output sin pid para verlos)');
+    let txt = '';
+    try { txt = await fsp.readFile(p.log, 'utf8'); } catch { }
+    const lines = txt.split(/\r?\n/);
+    return `${p.running === false ? `Terminado (código ${p.code})` : 'En ejecución'} · ${p.command}\n\n${lines.slice(-Math.min(1000, a.lines || 80)).join('\n') || '(sin salida todavía)'}`;
+  });
   add('system', 'read', 'clipboard_read', 'Lee el texto del portapapeles (o la imagen, si hay).', {}, [], async () => {
     const img = clipboard.readImage();
     if (!img.isEmpty()) return { text: 'Imagen del portapapeles', images: [{ data: img.toJPEG(85).toString('base64'), mime: 'image/jpeg' }] };
@@ -242,8 +284,8 @@ export function builtinTools(ctx) {
   add('system', 'read', 'notify', 'Muestra una notificación del sistema al usuario.', { title: { type: 'string' }, body: { type: 'string' } }, ['title'], async (a) => { new Notification({ title: a.title, body: a.body || '' }).show(); return 'Notificación mostrada'; });
 
   // ─── Control del ordenador ───
-  add('computer', 'computer', 'computer', 'Controla el ordenador. Acciones: screenshot (ver pantalla), click, double_click, triple_click, right_click, middle_click, move (x,y), drag (x,y → x2,y2), type (text), key (keys, p. ej. "ctrl+c", "enter", "win+r", "alt+tab"), scroll (direction up/down/left/right, amount, x,y opcionales), wait (seconds), cursor_position. Las coordenadas son píxeles de la ÚLTIMA captura. Tras acciones visuales se devuelve una nueva captura automáticamente.', {
-    action: { type: 'string', enum: ['screenshot', 'click', 'double_click', 'triple_click', 'right_click', 'middle_click', 'move', 'drag', 'type', 'key', 'scroll', 'wait', 'cursor_position'] },
+  add('computer', 'computer', 'computer', 'Controla el ordenador. Acciones: screenshot (ver pantalla), zoom (x,y → x2,y2: amplía esa zona de la última captura a resolución real para leer textos pequeños), click, double_click, triple_click, right_click, middle_click, move (x,y), drag (x,y → x2,y2), type (text), key (keys, p. ej. "ctrl+c", "enter", "win+r", "alt+tab"), scroll (direction up/down/left/right, amount, x,y opcionales), wait (seconds), cursor_position. Las coordenadas son píxeles de la ÚLTIMA captura. Tras acciones visuales se devuelve una nueva captura automáticamente.', {
+    action: { type: 'string', enum: ['screenshot', 'zoom', 'click', 'double_click', 'triple_click', 'right_click', 'middle_click', 'move', 'drag', 'type', 'key', 'scroll', 'wait', 'cursor_position'] },
     x: { type: 'number' }, y: { type: 'number' }, x2: { type: 'number' }, y2: { type: 'number' }, text: { type: 'string' }, keys: { type: 'string' },
     direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] }, amount: { type: 'integer' }, seconds: { type: 'number' }
   }, ['action'], async (a, c) => {
@@ -253,6 +295,10 @@ export function builtinTools(ctx) {
       await new Promise((r) => setTimeout(r, 250));
       const s = await computer.screenshot({ maxWidth: cfg.maxScreenshotWidth || 1366 });
       return { text: `Captura ${s.width}x${s.height} (pantalla real ${s.screenW}x${s.screenH}). Usa coordenadas de esta imagen.`, images: [{ data: s.data, mime: s.mime }] };
+    }
+    if (a.action === 'zoom') {
+      const z = await computer.zoom({ x: a.x, y: a.y, x2: a.x2, y2: a.y2 });
+      return { text: `Zoom de la zona (${Math.round(a.x)},${Math.round(a.y)})–(${Math.round(a.x2)},${Math.round(a.y2)}) a ${z.width}x${z.height}. Para hacer clic usa las coordenadas de la última captura completa, no las de este zoom.`, images: [{ data: z.data, mime: z.mime }] };
     }
     const msg = await computer.perform(a.action, a);
     if (cfg.screenshotAfterAction !== false && !['wait', 'cursor_position'].includes(a.action)) {
@@ -280,14 +326,21 @@ export function builtinTools(ctx) {
   });
 
   // ─── Navegador ───
-  add('browser', 'browser', 'browser', 'Controla el navegador integrado de Nexo (visible para el usuario, con sesión persistente). Acciones: navigate (url o búsqueda), read (texto de la página + lista de elementos interactivos numerados [n]), click (index), type (index, text, submit), press (key: Enter/Tab/Escape/ArrowDown...), scroll (direction, amount), back, forward, screenshot (ver la página), evaluate (script JS). Tras navigate/click usa read para ver el resultado.', {
-    action: { type: 'string', enum: ['navigate', 'read', 'click', 'type', 'press', 'scroll', 'back', 'forward', 'screenshot', 'evaluate'] },
-    url: { type: 'string' }, index: { type: 'integer' }, text: { type: 'string' }, submit: { type: 'boolean' }, key: { type: 'string' }, direction: { type: 'string', enum: ['up', 'down'] }, amount: { type: 'number' }, script: { type: 'string' }
+  add('browser', 'browser', 'browser', 'Controla el navegador integrado de Nexo (visible para el usuario, con sesión persistente). Acciones: navigate (url o búsqueda), read (texto de la página + elementos interactivos numerados [n]; offset para seguir leyendo páginas largas), find (text: localiza texto y elementos que lo contienen), click (index), hover (index), type (index, text, submit), fill (fields: [{index, value}] rellena varios campos de un formulario de una vez; checkboxes con value "true"/"false"), select (index, value: elige una opción de un desplegable), press (key: Enter/Tab/Escape/ArrowDown...), scroll (direction, amount), wait (seconds, o text para esperar a que aparezca), back, forward, screenshot (ver la página), console (mensajes y errores de la consola JS), evaluate (script JS). Tras navigate/click usa read para ver el resultado.', {
+    action: { type: 'string', enum: ['navigate', 'read', 'find', 'click', 'hover', 'type', 'fill', 'select', 'press', 'scroll', 'wait', 'back', 'forward', 'screenshot', 'console', 'evaluate'] },
+    url: { type: 'string' }, index: { type: 'integer' }, text: { type: 'string' }, submit: { type: 'boolean' }, key: { type: 'string' }, direction: { type: 'string', enum: ['up', 'down'] }, amount: { type: 'number' }, script: { type: 'string' },
+    value: { type: 'string' }, fields: { type: 'array', items: { type: 'object', properties: { index: { type: 'integer' }, value: { type: 'string' } }, required: ['index', 'value'] } }, offset: { type: 'integer', description: 'Carácter desde el que seguir leyendo (read)' }, seconds: { type: 'number' }
   }, ['action'], async (a) => {
     const summary = (s) => `Página: ${s.title || '(sin título)'}\nURL: ${s.url}`;
     switch (a.action) {
       case 'navigate': { const s = await browser.navigate(a.url || a.text); const r = await browser.read({ maxChars: 6000 }); return `${summary(s)}\n\n## Contenido\n${r.text}\n\n## Elementos interactivos\n${r.elements}`; }
-      case 'read': { const r = await browser.read({ maxChars: 14000 }); return `Página: ${r.title}\nURL: ${r.url}\nScroll: ${r.scrollY}/${r.scrollHeight}px\n\n## Contenido\n${r.text}\n\n## Elementos interactivos\n${r.elements}`; }
+      case 'read': { const r = await browser.read({ maxChars: 14000, offset: a.offset || 0 }); return `Página: ${r.title}\nURL: ${r.url}\nScroll: ${r.scrollY}/${r.scrollHeight}px${r.more ? `\nTexto mostrado: caracteres ${r.from}-${r.to} de ${r.total} (continúa con offset=${r.to})` : ''}\n\n## Contenido\n${r.text}\n\n## Elementos interactivos\n${r.elements}`; }
+      case 'find': return await browser.find(a.text || a.value || '');
+      case 'hover': { await browser.hover(a.index); return `Ratón sobre [${a.index}]`; }
+      case 'fill': return await browser.fill(a.fields || []);
+      case 'select': return await browser.select(a.index, a.value ?? a.text ?? '');
+      case 'wait': return await browser.wait({ seconds: a.seconds, text: a.text });
+      case 'console': return browser.consoleLog();
       case 'click': { const s = await browser.click(a.index); const r = await browser.read({ maxChars: 5000 }); return `Clic en [${a.index}]. ${summary(s)}\n\n## Contenido\n${r.text}\n\n## Elementos interactivos\n${r.elements}`; }
       case 'type': { const s = await browser.type(a.index, a.text || '', a.submit); if (a.submit) { const r = await browser.read({ maxChars: 5000 }); return `Escrito y enviado. ${summary(s)}\n\n## Contenido\n${r.text}\n\n## Elementos interactivos\n${r.elements}`; } return `Texto escrito en [${a.index}]`; }
       case 'press': { const s = await browser.press(a.key || 'Enter'); return `Tecla ${a.key || 'Enter'} pulsada. ${summary(s)}`; }
@@ -319,6 +372,16 @@ export function builtinTools(ctx) {
   add('core', 'read', 'update_plan', 'Muestra/actualiza la lista de pasos de la tarea actual para que el usuario vea el progreso. Úsalo en tareas de 3+ pasos.', {
     items: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' }, status: { type: 'string', enum: ['pending', 'in_progress', 'done'] } }, required: ['text', 'status'] } }
   }, ['items'], async (a, c) => { c.emitPlan?.(a.items || []); return 'Plan actualizado'; });
+
+  // ─── Preguntar al usuario ───
+  if (ctx.askUser) {
+    add('core', 'read', 'ask_user', 'Hace una pregunta al usuario y espera su respuesta. Úsala cuando haya una decisión que solo él puede tomar o la petición sea ambigua (no para pedir permiso de herramientas). Ofrece 2-4 opciones concretas si puedes; el usuario también puede escribir otra respuesta.', {
+      question: { type: 'string' }, options: { type: 'array', items: { type: 'string' }, description: 'Opciones sugeridas (2-4)' }
+    }, ['question'], async (a, c) => {
+      const answer = await ctx.askUser({ question: a.question, options: (a.options || []).slice(0, 6) }, c.signal);
+      return answer ? `El usuario respondió: ${answer}` : 'El usuario no respondió (pregunta cancelada). Continúa con la opción más razonable y explícalo.';
+    });
+  }
 
   // ─── Equipo de agentes ───
   if (ctx.delegate) {

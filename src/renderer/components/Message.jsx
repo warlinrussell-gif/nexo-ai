@@ -2,18 +2,28 @@ import { memo, useState } from 'react';
 import Icon, { TOOL_ICONS } from './Icon.jsx';
 import { IconButton } from './ui.jsx';
 import { renderMarkdown, onMarkdownClick } from '../lib/markdown.js';
-import { fileUrl, copyText, fmtBytes } from '../lib/api.js';
+import { fileUrl, copyText, fmtBytes, call } from '../lib/api.js';
 import { useStore } from '../lib/store.js';
 
 const TOOL_LABELS = {
   read_file: 'Leer archivo', write_file: 'Escribir archivo', edit_file: 'Editar archivo', list_directory: 'Listar carpeta', search_files: 'Buscar archivos', move_path: 'Mover', delete_path: 'Eliminar',
   run_command: 'Terminal', open_app: 'Abrir', system_info: 'Info del sistema', list_processes: 'Procesos', kill_process: 'Terminar proceso', clipboard_read: 'Leer portapapeles', clipboard_write: 'Copiar al portapapeles', notify: 'Notificación',
-  computer: 'Control del PC', web_search: 'Búsqueda web', fetch_url: 'Leer página', browser: 'Navegador', memory_save: 'Recordar', memory_forget: 'Olvidar', use_skill: 'Skill', update_plan: 'Plan', delegate_task: 'Delegar'
+  computer: 'Control del PC', web_search: 'Búsqueda web', fetch_url: 'Leer página', browser: 'Navegador', memory_save: 'Recordar', memory_forget: 'Olvidar', use_skill: 'Skill', update_plan: 'Plan', delegate_task: 'Delegar',
+  process_output: 'Salida de proceso', ask_user: 'Pregunta al usuario'
 };
+const OC_LABELS = { bash: 'terminal', read: 'leer', write: 'escribir', edit: 'editar', multiedit: 'editar', patch: 'parche', glob: 'buscar archivos', grep: 'buscar texto', list: 'listar', webfetch: 'leer web', websearch: 'buscar en web', todowrite: 'tareas', todoread: 'tareas', task: 'subagente', skill: 'skill' };
+const OC_ICONS = { bash: 'terminal', read: 'file', write: 'save', edit: 'pencil', multiedit: 'pencil', patch: 'pencil', glob: 'search', grep: 'search', list: 'folder-open', webfetch: 'globe', websearch: 'search', todowrite: 'list-checks', todoread: 'list-checks', task: 'bot' };
 
 export function toolSummary(b) {
   const a = b.args || {};
+  if (b.name?.startsWith('oc:')) {
+    const n = b.name.slice(3);
+    if (n === 'bash') return `$ ${a.command || ''}`;
+    return a.filePath || a.path || a.pattern || a.url || a.query || a.description || b.title || (a.todos ? `${a.todos.length} tareas` : '');
+  }
   switch (b.name) {
+    case 'ask_user': return a.question;
+    case 'process_output': return a.pid ? `PID ${a.pid}` : 'procesos en segundo plano';
     case 'run_command': return `$ ${a.command || ''}`;
     case 'read_file': case 'write_file': case 'edit_file': case 'delete_path': return a.path;
     case 'list_directory': return a.path || 'directorio de trabajo';
@@ -41,6 +51,7 @@ export function toolSummary(b) {
 }
 
 function toolLabel(name, server) {
+  if (name?.startsWith('oc:')) return `OpenCode · ${OC_LABELS[name.slice(3)] || name.slice(3)}`;
   if (name?.startsWith('mcp__')) { const parts = name.split('__'); return `${server || parts[1]} · ${parts.slice(2).join('__')}`; }
   return TOOL_LABELS[name] || name;
 }
@@ -64,7 +75,7 @@ function ToolBlock({ block }) {
   const setLightbox = (src) => useStore.setState({ lightbox: src });
   const status = block.status;
   const summary = toolSummary(block);
-  const icon = TOOL_ICONS[block.name] || (block.name?.startsWith('mcp__') ? 'plug' : 'wrench');
+  const icon = TOOL_ICONS[block.name] || (block.name?.startsWith('oc:') ? OC_ICONS[block.name.slice(3)] || 'terminal' : block.name?.startsWith('mcp__') ? 'plug' : 'wrench');
   const dur = block.endedAt && block.startedAt ? ((block.endedAt - block.startedAt) / 1000).toFixed(1) + ' s' : '';
   return (
     <div className={`tool ${status} ${open ? 'open' : ''}`}>
@@ -145,7 +156,7 @@ export function Blocks({ blocks = [], streaming, nested }) {
   );
 }
 
-const STATUS_TEXT = { starting: 'Preparando…', 'loading-model': 'Cargando modelo en memoria…', thinking: 'Pensando…', writing: '', tools: 'Usando herramientas…', waiting: 'En espera…' };
+const STATUS_TEXT = { starting: 'Preparando…', 'loading-model': 'Cargando modelo en memoria…', thinking: 'Pensando…', writing: '', tools: 'Usando herramientas…', waiting: 'En espera…', compacting: 'Compactando la conversación para liberar contexto…' };
 
 function StatusLine({ status }) {
   const t = STATUS_TEXT[status];
@@ -204,14 +215,9 @@ export default function Message({ msg, index, isLast, running, agent, onRegenera
   const variants = msg.variants;
   const fullText = variants ? '' : textOf(msg.blocks);
   return (
-    <div className={`msg ${isLast ? 'last' : ''}`}>
-      <div className="avatar" style={{ background: color }}><Icon name={agent?.icon || 'sparkles'} size={16} /></div>
+    <div className={`msg assistant ${isLast ? 'last' : ''}`}>
       <div className="content">
-        <div className="meta">
-          <strong>{msg.agentName || 'Nexo'}</strong>
-          {msg.modelName && <span className="ellipsis" style={{ maxWidth: 360 }}>{msg.modelName}</span>}
-          {msg.strategy && <span className="badge outline">{msg.strategy === 'concurrent' ? 'en paralelo' : 'por turnos'}</span>}
-        </div>
+        {msg.strategy && <div className="meta"><span className="badge outline">{msg.strategy === 'concurrent' ? 'en paralelo' : 'por turnos'}</span></div>}
         {variants ? (
           <div className="variants" style={{ gridTemplateColumns: `repeat(${Math.min(variants.length, 3)}, minmax(0, 1fr))` }}>
             {variants.map((v, i) => (
@@ -233,10 +239,17 @@ export default function Message({ msg, index, isLast, running, agent, onRegenera
         )}
         {msg.error && <div className="error-box">{msg.error}</div>}
         {msg.status === 'stopped' && <div className="notice">Respuesta detenida.</div>}
+        {active && <div className="msg-sign working"><span className="logo-mark sm spin" /></div>}
         {!active && (
           <div className="msg-actions">
+            <span className="msg-who" title={msg.modelName || ''}><span className="agent-dot" style={{ background: color }}><Icon name={agent?.icon || 'sparkles'} size={11} /></span>{msg.agentName || 'Nexo'}{msg.modelName && <span className="faint ellipsis" style={{ maxWidth: 260 }}>· {msg.modelName}</span>}</span>
             {!variants && <IconButton icon={copied ? 'check' : 'copy'} size={14} className="sm" title="Copiar" onClick={() => { copyText(fullText); setCopied(true); setTimeout(() => setCopied(false), 1200); }} />}
             {!variants && <IconButton icon="volume" size={14} className="sm" title="Leer en voz alta" onClick={() => onSpeak(fullText)} />}
+            {msg.checkpoint > 0 && <IconButton icon="history" size={14} className="sm" title={`Deshacer los cambios en archivos de esta respuesta y las siguientes (${msg.checkpoint} archivo${msg.checkpoint > 1 ? 's' : ''})`} onClick={async () => {
+              if (!window.confirm('¿Restaurar los archivos tal como estaban antes de esta respuesta? Se deshacen también los cambios de las respuestas posteriores.')) return;
+              try { const r = await call('chats.rewind', useStore.getState().currentChatId, msg.id); useStore.getState().toast(`Restaurados ${r.restored} archivo(s)${r.removed ? ` y eliminados ${r.removed} creado(s)` : ''}`, 'success'); } catch (e) { useStore.getState().toast(e.message, 'error'); }
+            }} />}
+            {msg.rewound && <span className="badge" title="Los cambios en archivos de esta respuesta se deshicieron">cambios deshechos</span>}
             <IconButton icon="regenerate" size={14} className="sm" title="Regenerar" onClick={() => onRegenerate(index)} />
             <IconButton icon="trash" size={14} className="sm" title="Eliminar mensaje" onClick={() => onDelete(index)} />
             <Usage usage={msg.usage} durationMs={msg.durationMs} />

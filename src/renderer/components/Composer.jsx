@@ -4,8 +4,12 @@ import { IconButton, Menu } from './ui.jsx';
 import { call, nexo, fmtBytes } from '../lib/api.js';
 import { useStore } from '../lib/store.js';
 import { Mic } from '../lib/audio.js';
+import AgentPicker from './AgentPicker.jsx';
+import ModelPicker from './ModelPicker.jsx';
+import OpenCodePicker, { useOpenCodeInfo } from './OpenCodePicker.jsx';
+import ThinkingPicker, { NEXO_LEVELS } from './ThinkingPicker.jsx';
 
-export default function Composer({ chat, running, onSend, onStop, onVoice, placeholder, disabled }) {
+export default function Composer({ chat, running, onSend, onStop, onVoice, placeholder, disabled, hero }) {
   const [text, setText] = useState('');
   const [atts, setAtts] = useState([]);
   const [focus, setFocus] = useState(false);
@@ -13,9 +17,36 @@ export default function Composer({ chat, running, onSend, onStop, onVoice, place
   const [rec, setRec] = useState(null); // { level: [] }
   const [transcribing, setTranscribing] = useState(false);
   const [permMenu, setPermMenu] = useState(null);
+  const [wsMenu, setWsMenu] = useState(null);
   const ta = useRef(null);
   const mic = useRef(null);
-  const { settings, toast, updateChat } = useStore();
+  const { settings, toast, updateChat, draft } = useStore();
+  const agentId = chat ? chat.agentId : (draft?.agentId || settings?.defaultAgent || 'assistant');
+  const modelRef = chat ? chat.model : (draft?.model || null);
+  const setAgent = (id, model) => {
+    if (chat) updateChat(chat.id, model ? { agentId: id, model } : { agentId: id });
+    else useStore.setState((s) => ({ draft: { ...s.draft, agentId: id, ...(model ? { model } : {}) } }));
+  };
+  const setModel = (model) => {
+    if (chat) updateChat(chat.id, { model });
+    else useStore.setState((s) => ({ draft: { ...s.draft, model } }));
+  };
+  const singleModel = !chat || !chat.mode || chat.mode === 'chat';
+  const agents = useStore((s) => s.agents);
+  const isOpenCode = agents.find((a) => a.id === agentId)?.runner === 'opencode';
+  const ocModel = chat ? (chat.opencodeModel ?? settings?.opencode?.model ?? '') : (draft?.opencodeModel ?? settings?.opencode?.model ?? '');
+  // al cambiar de modelo de OpenCode el nivel vuelve a "como en OpenCode" (cada modelo tiene sus propios niveles)
+  const setOcModel = (v) => chat ? updateChat(chat.id, { opencodeModel: v, opencodeVariant: null }) : useStore.setState((s) => ({ draft: { ...s.draft, opencodeModel: v, opencodeVariant: null } }));
+  const ocInfo = useOpenCodeInfo(isOpenCode);
+  const ocEffModel = ocModel && ocModel !== 'nexo:local' ? ocModel : ocInfo.state?.last;
+  const ocModelInfo = ocInfo.models?.find((m) => m.id === ocEffModel);
+  const ocVariant = (chat ? chat.opencodeVariant : draft?.opencodeVariant) || 'auto';
+  const setOcVariant = (v) => chat ? updateChat(chat.id, { opencodeVariant: v }) : useStore.setState((s) => ({ draft: { ...s.draft, opencodeVariant: v } }));
+  const effort = (chat ? chat.reasoningEffort : draft?.reasoningEffort) || settings?.reasoningEffort || 'auto';
+  const setEffort = (v) => chat ? updateChat(chat.id, { reasoningEffort: v }) : useStore.setState((s) => ({ draft: { ...s.draft, reasoningEffort: v } }));
+  const workspace = chat ? chat.workspace : draft?.workspace;
+  const setWorkspace = (w) => chat ? updateChat(chat.id, { workspace: w }) : useStore.setState((s) => ({ draft: { ...s.draft, workspace: w } }));
+  const chooseWorkspace = async () => { const d = await call('app.chooseFolder', 'Carpeta del proyecto para este chat', workspace || settings?.workspace); if (d) setWorkspace(d); };
 
   useEffect(() => { autosize(); }, [text]);
   useEffect(() => { ta.current?.focus(); }, [chat?.id]);
@@ -104,7 +135,7 @@ export default function Composer({ chat, running, onSend, onStop, onVoice, place
   const permInfo = { ask: { label: 'Preguntar', icon: 'shield' }, smart: { label: 'Inteligente', icon: 'shield-check' }, full: { label: 'Acceso total', icon: 'shield-alert' } }[perm];
 
   return (
-    <div className="composer-wrap">
+    <div className={`composer-wrap ${hero ? 'hero' : ''}`}>
       <div className={`composer ${focus ? 'focus' : ''} ${drag ? 'drag' : ''}`}
         onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
         onDrop={(e) => { e.preventDefault(); setDrag(false); addFiles([...e.dataTransfer.files]); }}>
@@ -126,25 +157,38 @@ export default function Composer({ chat, running, onSend, onStop, onVoice, place
             <button className="btn sm primary" onClick={() => stopDictation(false)}><Icon name="check" size={14} />Transcribir</button>
           </div>
         ) : (
-          <textarea ref={ta} rows={1} value={text} placeholder={transcribing ? 'Transcribiendo…' : (placeholder || 'Escribe un mensaje, arrastra archivos o pulsa el micrófono…')}
+          <textarea ref={ta} rows={1} value={text} placeholder={transcribing ? 'Transcribiendo…' : (placeholder || (hero ? '¿En qué puedo ayudarte hoy?' : 'Responde a Nexo…'))}
             onChange={(e) => setText(e.target.value)} onKeyDown={onKey} onPaste={onPaste} onFocus={() => setFocus(true)} onBlur={() => setFocus(false)} disabled={transcribing} />
         )}
         <div className="composer-bar">
-          <IconButton icon="paperclip" title="Adjuntar archivos o imágenes" onClick={pick} />
-          <button className="chip" onClick={(e) => setPermMenu(e.currentTarget)} title="Permisos de las herramientas"><Icon name={permInfo.icon} size={14} />{permInfo.label}</button>
-          <button className={`chip ${chat?.toolsOverride?.length === 0 ? '' : 'on'}`} title="Activar/desactivar herramientas en este chat" onClick={() => chat && updateChat(chat.id, { toolsOverride: chat.toolsOverride?.length === 0 ? null : [] })}>
-            <Icon name="wrench" size={14} />{chat?.toolsOverride?.length === 0 ? 'Sin herramientas' : 'Herramientas'}
+          <button className="tool-btn" title="Adjuntar archivos o imágenes" onClick={pick}><Icon name="plus" size={17} /></button>
+          <button className={`tool-btn ${perm === 'full' ? 'warn' : ''}`} onClick={(e) => setPermMenu(e.currentTarget)} title={`Permisos de las herramientas: ${permInfo.label}`}><Icon name={permInfo.icon} size={15} /><span className="tool-btn-label">{permInfo.label}</span></button>
+          <button className={`tool-btn ${chat?.toolsOverride?.length === 0 ? 'off' : 'on'}`} title={chat?.toolsOverride?.length === 0 ? 'Herramientas desactivadas en este chat' : 'Herramientas activadas (clic para desactivarlas en este chat)'} onClick={() => chat && updateChat(chat.id, { toolsOverride: chat.toolsOverride?.length === 0 ? null : [] })} disabled={!chat}>
+            <Icon name="wrench" size={15} />
           </button>
+          <button className={`tool-btn ${workspace ? 'on' : ''}`} title={`Carpeta de trabajo: ${workspace || settings?.workspace || 'predeterminada'}${workspace ? '' : ' (predeterminada)'}`} onClick={(e) => workspace ? setWsMenu(e.currentTarget) : chooseWorkspace()}>
+            <Icon name="folder" size={15} />{workspace && <span className="tool-btn-label ellipsis" style={{ maxWidth: 140 }}>{workspace.split(/[\\/]/).filter(Boolean).pop()}</span>}
+          </button>
+          <AgentPicker value={agentId} onChange={setAgent} compact />
           <span className="grow" />
           {transcribing && <span className="spinner sm" />}
+          {isOpenCode && <OpenCodePicker value={ocModel} onChange={setOcModel} chatId={chat?.id} />}
+          {isOpenCode && ocModelInfo?.variants?.length > 0 && <ThinkingPicker value={ocVariant} onChange={setOcVariant} levels={['auto', ...ocModelInfo.variants]} autoLabel={ocInfo.state?.variants?.[ocEffModel] ? `Como en OpenCode (${ocInfo.state.variants[ocEffModel]})` : 'Como en OpenCode'} />}
+          {!isOpenCode && singleModel && <ThinkingPicker value={effort} onChange={setEffort} levels={NEXO_LEVELS} />}
+          {singleModel && !isOpenCode && <ModelPicker value={modelRef} onChange={setModel} allowDefault flat />}
           <IconButton icon="mic" title="Dictar (voz a texto)" onClick={startDictation} disabled={!!rec || transcribing} />
           <IconButton icon="audio-lines" title="Conversación por voz" onClick={onVoice} />
           {running
-            ? <button className="send stop" onClick={onStop} title="Detener"><Icon name="stop" size={14} /></button>
+            ? <button className="send stop" onClick={onStop} title="Detener (Esc)"><Icon name="stop" size={13} /></button>
             : <button className="send" onClick={submit} disabled={disabled || (!text.trim() && !atts.length)} title="Enviar (Enter)"><Icon name="arrow-up" size={17} strokeWidth={2.4} /></button>}
         </div>
       </div>
-      <div className="composer-foot">La IA puede equivocarse. Revisa las acciones importantes. {permInfo.label === 'Acceso total' && <span style={{ color: 'var(--amber)' }}>Acceso total activado.</span>}</div>
+      {!hero && <div className="composer-foot">Nexo puede cometer errores. Revisa las acciones importantes. {perm === 'full' && <span style={{ color: 'var(--amber)' }}>Acceso total activado.</span>}</div>}
+      {wsMenu && <Menu anchor={wsMenu} onClose={() => setWsMenu(null)} width={320} items={[
+        { header: true, label: workspace },
+        { icon: 'folder-open', label: 'Cambiar carpeta del proyecto…', onClick: chooseWorkspace },
+        { icon: 'x', label: 'Usar la carpeta predeterminada', onClick: () => setWorkspace(null) }
+      ]} />}
       {permMenu && <Menu anchor={permMenu} onClose={() => setPermMenu(null)} width={300} items={[
         { header: true, label: chat ? 'Permisos en este chat' : 'Permisos predeterminados' },
         { icon: 'shield', label: 'Preguntar antes de modificar', onClick: () => setPerm('ask') },

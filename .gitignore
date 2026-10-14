@@ -1,3 +1,11 @@
 node_modules/
 dist/
 release/
+NexoData/
+logs/
+*.log
+.env
+.env.*
+*.gguf
+.DS_Store
+Thumbs.db

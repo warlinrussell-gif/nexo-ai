@@ -84,7 +84,12 @@ export function Popover({ anchor, onClose, children, align = 'left', width, plac
     const w = width || 280;
     let left = align === 'right' ? r.right - w : r.left;
     left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
-    if (placement === 'top') setPos({ left, bottom: window.innerHeight - r.top + 6, width: w });
+    if (placement === 'top') {
+      // hacia arriba, pero sin salirse de la ventana; si arriba hay poco sitio y abajo más, se abre hacia abajo
+      const spaceAbove = r.top - 12, spaceBelow = window.innerHeight - r.bottom - 12;
+      if (spaceAbove < 220 && spaceBelow > spaceAbove) setPos({ left, top: r.bottom + 6, width: w, maxH: Math.min(maxHeight, spaceBelow) });
+      else setPos({ left, bottom: window.innerHeight - r.top + 6, width: w, maxH: Math.min(maxHeight, spaceAbove) });
+    }
     else {
       const spaceBelow = window.innerHeight - r.bottom - 12;
       if (spaceBelow < 260 && r.top > spaceBelow) setPos({ left, bottom: window.innerHeight - r.top + 6, width: w, maxH: Math.min(maxHeight, r.top - 20) });

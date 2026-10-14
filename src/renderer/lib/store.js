@@ -21,6 +21,7 @@ export const useStore = create((set, get) => ({
   agents: [],
   mcp: [],
   approvals: [],
+  questions: [],
   toasts: [],
   browserOpen: false,
   browserState: { url: '', title: '' },
@@ -28,6 +29,7 @@ export const useStore = create((set, get) => ({
   paletteOpen: false,
   voice: { mode: 'off', status: 'idle' },
   lightbox: null,
+  draft: {},
   modelsTab: 'discover',
   settingsTab: 'general',
 
@@ -131,7 +133,7 @@ export function applyTheme(settings) {
   let theme = settings.theme || 'dark';
   if (theme === 'system') theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
   root.dataset.theme = theme;
-  root.style.setProperty('--accent', settings.accent || '#8b5cf6');
+  root.style.setProperty('--accent', settings.accent || '#d97757');
   root.style.setProperty('--fs', `${Math.round(14 * (settings.fontScale || 1) * 10) / 10}px`);
 }
 
@@ -157,8 +159,11 @@ export function wireEvents() {
   on('llama', (instances) => st.setState({ instances }));
   on('mcp', (mcp) => st.setState({ mcp }));
   on('models-changed', () => st.getState().refreshLocal());
+  on('catalog-changed', () => st.setState((s) => ({ catalogVersion: (s.catalogVersion || 0) + 1 })));
   on('providers-changed', () => st.getState().refreshProviders());
   on('approval', (a) => st.setState((s) => ({ approvals: [...s.approvals, a] })));
+  on('question', (q) => st.setState((s) => ({ questions: [...s.questions, q] })));
+  on('question-done', ({ id }) => st.setState((s) => ({ questions: s.questions.filter((q) => q.id !== id) })));
   on('approval-done', ({ id }) => st.setState((s) => ({ approvals: s.approvals.filter((a) => a.id !== id) })));
   on('browser-state', (browserState) => st.setState({ browserState }));
   on('browser-open', () => st.setState({ browserOpen: true }));

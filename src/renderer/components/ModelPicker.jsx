@@ -40,7 +40,7 @@ export function FitPill({ plan, showTps = true }) {
   return <span className="fit-pill" style={{ color: r.color }}><i style={{ background: r.color }} />{r.label}{showTps && plan.fits && plan.tps ? <span className="muted" style={{ fontWeight: 500 }}>· ~{plan.tps >= 100 ? Math.round(plan.tps) : plan.tps} tok/s</span> : null}</span>;
 }
 
-export default function ModelPicker({ value, onChange, multiple, placeholder = 'Elegir modelo', allowDefault, compact, width = 400 }) {
+export default function ModelPicker({ value, onChange, multiple, placeholder = 'Elegir modelo', allowDefault, compact, flat, width = 400 }) {
   const btn = useRef(null);
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
@@ -58,8 +58,8 @@ export default function ModelPicker({ value, onChange, multiple, placeholder = '
   const currentLocal = !multiple && value?.startsWith('local:');
   return (
     <>
-      <button ref={btn} className="picker-btn" onClick={() => setOpen(!open)} title="Modelo">
-        <Icon name={multiple ? 'columns' : currentLocal ? 'disk' : value ? 'cloud' : 'models'} size={15} />
+      <button ref={btn} className={`picker-btn ${flat ? 'flat' : ''}`} onClick={() => setOpen(!open)} title="Modelo">
+        {!flat && <Icon name={multiple ? 'columns' : currentLocal ? 'disk' : value ? 'cloud' : 'models'} size={15} />}
         <span className="ellipsis" style={compact ? { maxWidth: 150 } : undefined}>{label || placeholder}</span>
         <Icon name="chevron-down" size={14} className="faint" />
       </button>

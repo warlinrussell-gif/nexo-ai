@@ -4,6 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { inspect } from 'node:util';
 
 import * as paths from './paths.js';
 import { load, save, encrypt, decrypt, flushAll, resetCache } from './store.js';
@@ -18,10 +19,11 @@ import * as skills from './skills.js';
 import * as agents from './agents.js';
 import * as chats from './chats.js';
 import { Engine } from './engine.js';
+import * as opencode from './opencode.js';
 import { browser } from './browser.js';
 import * as voice from './voice.js';
 import { shutdownInput } from './computer.js';
-import { planModel, planMulti, staticBudget } from '../shared/fit.js';
+import { planModel, planMulti, staticBudget, recommendContext } from '../shared/fit.js';
 import { uid, isWin, isMac, dirSize } from './util.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -54,12 +56,13 @@ if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
 
 let win = null, overlay = null, tray = null, quitting = false, initialized = false, engine = null;
 const pendingApprovals = new Map();
+const pendingQuestions = new Map();
 
 const DEFAULT_SETTINGS = {
-  theme: 'dark', accent: '#8b5cf6', fontScale: 1, sendOnEnter: true, showReasoning: true, compact: false,
+  theme: 'dark', accent: '#d97757', fontScale: 1, sendOnEnter: true, showReasoning: true, compact: false,
   defaultModel: null, defaultAgent: 'assistant', customInstructions: '', workspace: '',
   permissions: { mode: 'smart' }, toolsEnabled: true, reasoningEffort: 'auto',
-  ctx: 8192, kvType: 'f16', threads: 0, parallel: 1, autoUnloadMinutes: 30, reserveVramMB: 700, autoSwap: true, backendOverride: '',
+  ctx: 8192, autoCtx: true, autoCompact: true, hooks: [], opencode: { path: '', model: '', autoApprove: false }, kvType: 'f16', threads: 0, parallel: 1, autoUnloadMinutes: 30, reserveVramMB: 700, autoSwap: true, backendOverride: '',
   voice: { stt: 'whisper-local', whisperModel: 'small-q5_1', language: 'es', tts: 'system', systemVoice: '', piperVoice: 'es_ES-davefx-medium', openaiVoice: 'alloy', elevenVoice: '', rate: 1, autoSpeak: false, wakeWord: 'jarvis', jarvisAgent: 'jarvis', jarvisModel: '', hotkey: 'CommandOrControl+Shift+Space', vadThreshold: 0.5, silenceMs: 900 },
   web: { searchEngine: 'auto', searxngUrl: '' },
   computer: { hideWindow: true, maxScreenshotWidth: 1366, screenshotAfterAction: true },
@@ -75,13 +78,33 @@ function send(channel, payload) {
   for (const w of [win, overlay]) if (w && !w.isDestroyed()) w.webContents.send('nexo:event', channel, payload);
 }
 
+// ───────────────── Registro de errores en NexoData/logs/main.log ─────────────────
+let fileLogInstalled = false;
+function installFileLog() {
+  if (fileLogInstalled) return;
+  let file;
+  try { file = path.join(paths.dir('logs'), 'main.log'); } catch { return; }
+  fileLogInstalled = true;
+  try { if (fs.existsSync(file) && fs.statSync(file).size > 5e6) fs.renameSync(file, file + '.old'); } catch { }
+  const fmt = (a) => (typeof a === 'string' ? a : inspect(a, { depth: 4, breakLength: 160 }));
+  const write = (lvl, args) => { try { fs.appendFileSync(file, `[${new Date().toISOString()}] ${lvl} ${args.map(fmt).join(' ')}\n`); } catch { } };
+  for (const lvl of ['error', 'warn']) {
+    const orig = console[lvl].bind(console);
+    console[lvl] = (...a) => { orig(...a); write(lvl.toUpperCase(), a); };
+  }
+  write('INFO', [`Nexo AI ${app.getVersion()} iniciado (Electron ${process.versions.electron}, ${process.platform})`]);
+}
+
 // ───────────────── Inicialización tras elegir carpeta de datos ─────────────────
 async function initCore() {
   if (initialized) return;
   initialized = true;
   paths.ensureDirs();
+  installFileLog();
   const s = getSettings();
   if (!s.workspace) { s.workspace = paths.dir('workspace'); save('settings', s); }
+  // Interfaz 1.2: el morado anterior era el acento por defecto; si nunca se cambió, pasa al nuevo tono cálido
+  if ((s.uiVersion || 1) < 2) { if (!s.accent || s.accent === '#8b5cf6') s.accent = '#d97757'; s.uiVersion = 2; save('settings', s, true); }
   downloads.init();
   downloads.headersFor = (url) => (/huggingface\.co/.test(url) && secret('hfToken') ? { Authorization: `Bearer ${secret('hfToken')}` } : {});
   downloads.on('update', (j) => send('downloads', j));
@@ -95,7 +118,7 @@ async function initCore() {
   browser.on('state', (st) => send('browser-state', st));
   browser.on('request-open', () => { if (getSettings().browser?.autoOpen !== false) send('browser-open', {}); });
   try { skills.seedSkills(); } catch (e) { console.error('skills', e); }
-  engine = new Engine({ getSettings, getHardware: () => scanHardware(), requestApproval, webKeys: () => ({ brave: secret('brave'), tavily: secret('tavily') }) });
+  engine = new Engine({ getSettings, getHardware: () => scanHardware(), requestApproval, askUser, webKeys: () => ({ brave: secret('brave'), tavily: secret('tavily') }) });
   engine.on('message', (p) => send('message', p));
   engine.on('chat-meta', (p) => send('chat-meta', p));
   engine.on('run-end', (p) => { send('run-end', p); endComputerUse(); });
@@ -123,6 +146,19 @@ function requestApproval(req) {
     pendingApprovals.set(id, resolve);
     send('approval', { id, ...req });
     if (win && !win.isVisible() && !overlay) { win.show(); }
+    if (win && !win.isFocused() && !overlay) win.flashFrame(true);
+  });
+}
+
+// ───────────────── Preguntas del agente al usuario (ask_user) ─────────────────
+function askUser(req, signal) {
+  return new Promise((resolve) => {
+    const id = uid('q_');
+    const done = (answer) => { if (!pendingQuestions.has(id)) return; pendingQuestions.delete(id); send('question-done', { id }); resolve(answer); };
+    pendingQuestions.set(id, done);
+    signal?.addEventListener('abort', () => done(null), { once: true });
+    send('question', { id, ...req });
+    if (win && !win.isVisible() && !overlay) win.show();
     if (win && !win.isFocused() && !overlay) win.flashFrame(true);
   });
 }
@@ -225,6 +261,8 @@ const api = {
   // Catálogo y modelos
   'catalog.get': () => models.getCatalog(),
   'catalog.refresh': () => models.refreshCatalogLive(),
+  'catalog.discover': async () => { const r = await models.discoverNewModels(); send('catalog-changed', r); return r; },
+  'catalog.lastDiscover': () => models.lastDiscover(),
   'catalog.repo': (repo, quant) => models.repoDetails(repo, { quant }),
   'catalog.search': (q, sort) => models.searchHF(q, { sort }),
   'models.local': async () => { const l = await models.listLocalModels(); if (engine) engine.localCache = { t: Date.now(), list: l }; return l; },
@@ -241,8 +279,11 @@ const api = {
     if (!m) throw new Error('Modelo no encontrado');
     const live = await llama.planFor(m, opts);
     const hw = await scanHardware();
-    const statik = planModel(m.meta, staticBudget(hw), { ctx: opts.ctx || m.settings?.ctx || getSettings().ctx, fileSize: m.size });
-    return { live, static: statik };
+    const statik = planModel(m.meta, staticBudget(hw), { ctx: live.ctx, kvType: live.kvType, fileSize: m.size });
+    const b = await llama.budget(m.id);
+    const mm = m.mmproj && m.settings?.vision !== false ? fs.statSync(m.mmproj).size : 0;
+    const rec = recommendContext(m.meta, b, { fileSize: m.size, mmprojSize: mm });
+    return { live, static: statik, rec };
   },
   'models.planMulti': async (refs, ctx) => {
     const l = await models.listLocalModels();
@@ -288,7 +329,8 @@ const api = {
 
   // Chats
   'chats.list': () => chats.listChats(),
-  'chats.get': (id) => chats.getChat(id),
+  // copia sin campos internos (_pending es un temporizador del motor y no se puede enviar por IPC si el chat está respondiendo)
+  'chats.get': (id) => { const c = chats.getChat(id); return c ? JSON.parse(JSON.stringify(c, (k, v) => (k.startsWith('_') ? undefined : v))) : c; },
   'chats.create': (d) => chats.createChat({ agentId: getSettings().defaultAgent, model: getSettings().defaultModel, ...d }),
   'chats.update': (id, patch) => chats.updateChat(id, patch),
   'chats.delete': (id) => { engine?.stop(id); chats.deleteChat(id); },
@@ -363,6 +405,13 @@ const api = {
   'voice.stop': () => voice.stopWhisper(),
 
   // Aprobaciones
+  'question.respond': (id, answer) => { pendingQuestions.get(id)?.(answer || null); },
+  'chats.rewind': (id, messageId) => engine.rewind(id, messageId),
+  'chats.clearSummary': (id) => { const c = chats.getChat(id); if (c) { delete c.summary; chats.saveChat(c, true); } return true; },
+  'opencode.status': () => opencode.status(getSettings().opencode?.path),
+  'opencode.models': (force) => opencode.listModels({ custom: getSettings().opencode?.path, force }),
+  'opencode.state': () => opencode.readState(),
+  'opencode.newSession': (id) => { const c = chats.getChat(id); if (c) { delete c.opencodeSession; chats.saveChat(c, true); } return true; },
   'approval.respond': (id, decision) => { const r = pendingApprovals.get(id); if (r) { pendingApprovals.delete(id); r(decision); send('approval-done', { id }); } },
   'overlay.stop': () => { for (const id of engine.runs.keys()) engine.stop(id); },
 
@@ -390,7 +439,7 @@ function createWindow() {
   nativeTheme.themeSource = theme === 'light' ? 'light' : theme === 'system' ? 'system' : 'dark';
   win = new BrowserWindow({
     width: 1440, height: 920, minWidth: 980, minHeight: 640, show: false,
-    backgroundColor: theme === 'light' ? '#f7f7f8' : '#0c0c10',
+    backgroundColor: theme === 'light' ? '#faf9f5' : '#262624',
     title: 'Nexo AI', icon: fs.existsSync(ICON) ? ICON : undefined,
     titleBarStyle: 'hidden',
     ...(isMac ? { trafficLightPosition: { x: 16, y: 15 } } : { titleBarOverlay: overlayColors() }),
@@ -402,6 +451,8 @@ function createWindow() {
   win.on('close', (e) => {
     if (!quitting && getSafeCloseToTray()) { e.preventDefault(); win.hide(); }
   });
+  win.webContents.on('console-message', (e) => { if (e.level === 'error') console.error('[interfaz]', e.message, e.sourceId ? `(${e.sourceId}:${e.lineNumber})` : ''); });
+  win.webContents.on('render-process-gone', (_e, d) => console.error('[interfaz] proceso de renderizado terminado:', d));
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
   win.webContents.on('will-navigate', (e, url) => { if (!url.startsWith('file:')) { e.preventDefault(); shell.openExternal(url); } });
 }
@@ -463,7 +514,24 @@ app.whenReady().then(async () => {
   try { createTray(); } catch (e) { console.error('tray', e); }
   registerHotkey();
   if (isMac) app.dock?.setIcon?.(path.join(APP_ROOT, 'resources', 'icon.png'));
+  scheduleCatalogDiscovery();
 });
+
+// Busca modelos recién lanzados al arrancar (si hace más de 24 h) y cada 6 h mientras Nexo esté abierto
+function scheduleCatalogDiscovery() {
+  const check = async () => {
+    if (!paths.getDataDir() || getSettings().autoDiscoverModels === false) return;
+    const last = models.lastDiscover();
+    if (last && Date.now() - new Date(last).getTime() < 24 * 3600e3) return;
+    try {
+      const r = await models.discoverNewModels();
+      send('catalog-changed', r);
+      if (r.added.length) send('toast', { text: `Nuevos modelos en el catálogo: ${r.added.slice(0, 4).join(', ')}${r.added.length > 4 ? ` y ${r.added.length - 4} más` : ''}`, type: 'info' });
+    } catch (e) { console.error('catalog discover', e); }
+  };
+  setTimeout(check, 30e3);
+  setInterval(check, 6 * 3600e3);
+}
 
 app.on('before-quit', () => { quitting = true; });
 app.on('will-quit', async (e) => {

@@ -4,12 +4,13 @@ import { call, fmtBytes, fmtNum, fmtParams, fmtDuration, colorFor, RATING, CAPS,
 import Icon from '../components/Icon.jsx';
 import { Button, IconButton, Tabs, Drawer, Seg, Toggle, Empty, Progress, Modal, Confirm, Field } from '../components/ui.jsx';
 import { FitPill } from '../components/ModelPicker.jsx';
-import { planModel, planMulti, staticBudget, quantQuality, QUANT_BPW, GiB } from '../../shared/fit.js';
+import { planModel, planMulti, staticBudget, quantQuality, plausibleQuant, QUANT_BPW, GiB } from '../../shared/fit.js';
+import { TASKS, GROUPS, rankForTask, groupOf } from '../../shared/tasks.js';
 
 // ───────── helpers ─────────
 function bestQuant(model, budget, ctx) {
   if (!model.quants?.length || !budget) return null;
-  const plans = model.quants.filter((q) => (QUANT_BPW[q.quant] || 5) >= 3.4 && (QUANT_BPW[q.quant] || 5) <= 8.6).map((q) => ({ q, p: planModel(model.meta || { params: model.params }, budget, { ctx, fileSize: q.size }) }));
+  const plans = model.quants.filter((q) => plausibleQuant(q, model.params) && (QUANT_BPW[q.quant] || 5) >= 3.4 && (QUANT_BPW[q.quant] || 5) <= 8.6).map((q) => ({ q, p: planModel(model.meta || { params: model.params }, budget, { ctx, fileSize: q.size }) }));
   plans.sort((a, b) => b.q.size - a.q.size);
   const rec = model.quants.find((q) => q.quant === model.recommended);
   const pick = plans.find((x) => x.p.rating === 'fluido' && (QUANT_BPW[x.q.quant] || 5) <= 6.7) || plans.find((x) => x.p.rating === 'bueno') || plans.find((x) => x.p.fits);
@@ -47,7 +48,7 @@ function MemBar({ plan, budget }) {
 const MODE_TEXT = { gpu: '100% en GPU', moe: 'MoE: atención en GPU + expertos en RAM', partial: 'Reparto GPU + RAM (offload)', cpu: 'Solo CPU/RAM' };
 
 // ───────── Descubrir ─────────
-function ModelCard({ m, budget, ctx, onOpen, localMatch }) {
+function ModelCard({ m, budget, ctx, onOpen, localMatch, why }) {
   const best = m.meta || m.quants ? bestQuant(m, budget, ctx) : null;
   const approx = !m.quants && m.params ? planModel({ params: m.params }, budget || { vram: 0, ram: 8 * GiB }, { ctx, fileSize: m.approxSize }) : null;
   const plan = best?.p || approx;
@@ -59,9 +60,11 @@ function ModelCard({ m, budget, ctx, onOpen, localMatch }) {
           <div className="name">{m.name}</div>
           <div className="pub">{m.publisher}{m.params ? ` · ${fmtParams(m.params)}` : ''}{m.downloads ? ` · ${fmtNum(m.downloads)} descargas` : ''}</div>
         </div>
+        {m.tags?.includes('nuevo') && <span className="badge green"><Icon name="sparkles" size={11} />Nuevo</span>}
         {m.tags?.includes('recomendado') && <span className="badge accent"><Icon name="star" size={11} />Top</span>}
       </div>
       {m.desc && <div className="desc">{m.desc}</div>}
+      {why && <div className="small" style={{ color: 'var(--text-2, inherit)' }}><Icon name="info" size={11} /> {why}</div>}
       <div className="row wrap" style={{ gap: 5 }}><Caps caps={m.caps} />{m.ctx ? <span className="badge">{fmtNum(m.ctx)} ctx</span> : null}</div>
       <div className="foot">
         {plan && budget ? <FitPill plan={plan} /> : <span className="small muted">Calculando…</span>}
@@ -166,7 +169,18 @@ function Discover() {
   const [open, setOpen] = useState(null);
   const ctx = settings?.ctx || 8192;
   const budget = hw ? staticBudget(hw) : null;
-  useEffect(() => { call('catalog.get').then(setCatalog); }, []);
+  const catalogVersion = useStore((st) => st.catalogVersion);
+  const [discovering, setDiscovering] = useState(false);
+  const [lastDisc, setLastDisc] = useState(null);
+  useEffect(() => { call('catalog.get').then(setCatalog); call('catalog.lastDiscover').then(setLastDisc).catch(() => { }); }, [catalogVersion]);
+  async function discover() {
+    setDiscovering(true);
+    try {
+      const r = await call('catalog.discover');
+      useStore.getState().toast(r.added.length ? `Añadidos ${r.added.length} modelos nuevos: ${r.added.join(', ')}` : 'No hay modelos nuevos desde la última vez', r.added.length ? 'success' : 'info', 8000);
+    } catch (e) { useStore.getState().toast(e.message, 'error'); }
+    setDiscovering(false);
+  }
   useEffect(() => {
     const onSearch = (e) => {
       setQ(e.detail);
@@ -189,8 +203,16 @@ function Discover() {
     const plan = best?.p || (budget && m.params ? planModel({ params: m.params }, budget, { ctx, fileSize: m.approxSize }) : null);
     return { m, plan };
   }), [list, budget, ctx]);
+  const taskRanks = useMemo(() => {
+    if (!budget || !catalog?.models) return {};
+    return Object.fromEntries(Object.keys(TASKS).map((t) => [t, rankForTask(catalog.models, t, budget, ctx)]));
+  }, [catalog, budget, ctx]);
+  const isTask = filter.startsWith('task:');
+  const taskEntries = isTask ? (taskRanks[filter.slice(5)] || []) : null;
+  const taskOrder = isTask ? taskEntries.map((r) => r.m.id) : null;
   const filtered = enriched.filter(({ m, plan }) => {
     if (source === 'curated' && q.trim() && !(m.name + ' ' + m.publisher + ' ' + (m.desc || '')).toLowerCase().includes(q.toLowerCase())) return false;
+    if (isTask) return taskOrder.includes(m.id);
     switch (filter) {
       case 'fluido': return plan?.rating === 'fluido';
       case 'runs': return plan && plan.fits;
@@ -202,7 +224,8 @@ function Discover() {
       default: return true;
     }
   });
-  if (source === 'curated') filtered.sort((a, b) => (RATING_RANK[a.plan?.rating] ?? 5) - (RATING_RANK[b.plan?.rating] ?? 5) || (b.m.tags?.includes('recomendado') - a.m.tags?.includes('recomendado')) || (b.m.params - a.m.params));
+  if (isTask) filtered.sort((a, b) => taskOrder.indexOf(a.m.id) - taskOrder.indexOf(b.m.id));
+  else if (source === 'curated') filtered.sort((a, b) => (RATING_RANK[a.plan?.rating] ?? 5) - (RATING_RANK[b.plan?.rating] ?? 5) || (b.m.tags?.includes('recomendado') - a.m.tags?.includes('recomendado')) || (b.m.params - a.m.params));
   const counts = { fluido: enriched.filter((x) => x.plan?.rating === 'fluido').length, runs: enriched.filter((x) => x.plan?.fits).length };
   const gpu = hw?.gpus?.filter((g) => g.usable).sort((a, b) => b.vram - a.vram)[0];
   const top = enriched.filter((x) => x.plan?.rating === 'fluido' && x.m.tags?.includes('recomendado')).sort((a, b) => b.m.params - a.m.params)[0];
@@ -217,7 +240,13 @@ function Discover() {
             <div className="small muted">{counts.fluido} modelos del catálogo van fluidos en tu equipo y {counts.runs} pueden ejecutarse (algunos con offload a RAM).{top ? ` Recomendación destacada: ${top.m.name}.` : ''}</div>
           </> : <div className="row"><span className="spinner" />Analizando tu equipo…</div>}
         </div>
-        <Button size="sm" icon="gauge" onClick={() => useStore.getState().setView('hardware')}>Detalles</Button>
+        <div className="col" style={{ gap: 4, alignItems: 'flex-end' }}>
+          <div className="row" style={{ gap: 6 }}>
+            <Button size="sm" icon="refresh" loading={discovering} onClick={discover}>Buscar novedades</Button>
+            <Button size="sm" icon="gauge" onClick={() => useStore.getState().setView('hardware')}>Detalles</Button>
+          </div>
+          <span className="tiny muted">{lastDisc ? `Última revisión: ${timeAgo(new Date(lastDisc).getTime())} · se revisa sola cada día` : 'Se revisa sola cada día'}</span>
+        </div>
       </div>
       <div className="row wrap" style={{ marginBottom: 14, gap: 10 }}>
         <Seg value={source} onChange={setSource} options={[{ value: 'curated', label: 'Recomendados', icon: 'star' }, { value: 'trending', label: 'Tendencias', icon: 'flame' }, { value: 'downloads', label: 'Más descargados', icon: 'trending' }, { value: 'search', label: 'Buscar', icon: 'search' }]} />
@@ -225,6 +254,12 @@ function Discover() {
           <input className="input" placeholder={source === 'curated' ? 'Filtrar o buscar en Hugging Face (Enter)…' : 'Buscar modelos GGUF en Hugging Face…'} value={q} onChange={(e) => setQ(e.target.value)} style={{ height: 34 }} />
           <Button type="submit" icon="search" size="sm" style={{ height: 34 }}>Buscar</Button>
         </form>
+      </div>
+      {source === 'curated' && !q.trim() && budget && <TaskPicks ranks={taskRanks} onOpen={setOpen} onTask={(t) => setFilter(`task:${t}`)} localModels={localModels} />}
+      <div className="filters">
+        {Object.entries(TASKS).map(([k, t]) => (
+          <button key={k} className={`chip ${filter === `task:${k}` ? 'on' : ''}`} onClick={() => setFilter(`task:${k}`)}><Icon name={t.icon} size={12} />{t.label}</button>
+        ))}
       </div>
       <div className="filters">
         {[['all', 'Todos'], ['fluido', `Fluidos (${counts.fluido})`], ['runs', `Se pueden ejecutar (${counts.runs})`], ['vision', 'Visión'], ['code', 'Código'], ['computer', 'Control del PC'], ['moe', 'MoE rápidos'], ['light', 'Ligeros']].map(([k, l]) => (
@@ -234,7 +269,7 @@ function Discover() {
         <span className="small muted">Estimaciones con contexto de {fmtNum(ctx)} tokens</span>
       </div>
       {loading ? <div className="row" style={{ padding: 30, justifyContent: 'center' }}><span className="spinner" />Consultando Hugging Face…</div> : (
-        filtered.length ? <div className="cards">{filtered.map(({ m }) => <ModelCard key={m.id} m={m} budget={budget} ctx={ctx} onOpen={setOpen} localMatch={localModels.some((l) => l.repo === m.repo)} />)}</div>
+        filtered.length ? <GroupedCards items={filtered.map(({ m, plan }) => { const e = isTask ? taskEntries.find((r) => r.m.id === m.id) : null; return { m, group: e ? e.group : (plan ? groupOf(plan) : 'sin'), why: e?.why }; })} render={({ m, why }) => <ModelCard key={m.id} m={m} budget={budget} ctx={ctx} onOpen={setOpen} why={why} localMatch={localModels.some((l) => l.repo === m.repo)} />} />
           : <Empty icon="search" title="Sin resultados">Prueba otro filtro o busca por nombre (p. ej. «qwen», «gemma», «llama», «coder»).</Empty>
       )}
       {open && <ModelDetail model={open} onClose={() => setOpen(null)} />}
@@ -243,28 +278,100 @@ function Discover() {
 }
 const RATING_RANK = { fluido: 0, bueno: 1, lento: 2, muylento: 3, nofit: 4 };
 
+const GROUP_DOT = { fluido: 'var(--green, #3a9d5d)', lento: 'var(--amber, #d4a017)', noapto: 'var(--red, #d64545)', sin: 'var(--text-3, #888)' };
+// Lista de modelos agrupada: fluidos, lentos, no aptos
+function GroupedCards({ items, render }) {
+  const groups = [...Object.keys(GROUPS), 'sin'].map((g) => [g, items.filter((x) => x.group === g)]).filter(([, l]) => l.length);
+  return groups.map(([g, l]) => (
+    <div key={g} style={{ marginBottom: 18 }}>
+      <div className="row" style={{ gap: 8, margin: '4px 0 10px' }}>
+        <span style={{ width: 10, height: 10, borderRadius: 5, background: GROUP_DOT[g] }} />
+        <strong>{GROUPS[g]?.label || 'Sin estimación'}</strong><span className="badge">{l.length}</span>
+        {g === 'noapto' && <span className="small muted">no caben en tu equipo o no tienen lo que la tarea necesita</span>}
+      </div>
+      <div className="cards" style={g === 'noapto' ? { opacity: 0.75 } : undefined}>{l.map(render)}</div>
+    </div>
+  ));
+}
+
+// Mejor modelo de cada tarea para el equipo del usuario
+function TaskPicks({ ranks, onOpen, onTask, localModels }) {
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="row" style={{ marginBottom: 10 }}><Icon name="sparkles" size={16} style={{ color: 'var(--accent)' }} /><strong>El mejor para cada tarea en tu equipo</strong><span className="grow" /><span className="small muted">Pulsa un modelo para descargarlo · "Ver más" para alternativas</span></div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 10 }}>
+        {Object.entries(TASKS).map(([k, t]) => {
+          const list = (ranks[k] || []).filter((r) => r.group !== 'noapto');
+          return (
+            <div key={k} className="col" style={{ gap: 6, padding: 10, borderRadius: 10, background: 'var(--surface-2)' }}>
+              <div className="row" style={{ gap: 6 }}><Icon name={t.icon} size={14} /><strong className="small">{t.label}</strong></div>
+              <div className="tiny muted">{t.desc}</div>
+              {list.length ? list.slice(0, 2).map((r, i) => (
+                <button key={r.m.id} className="chip" style={{ justifyContent: 'flex-start', textAlign: 'left', height: 'auto', padding: '6px 8px', flexDirection: 'column', alignItems: 'flex-start', gap: 2 }} onClick={() => onOpen(r.m)}>
+                  <span className="small" style={{ fontWeight: 600, color: 'var(--text)' }}>{i === 0 ? '★ ' : ''}{r.m.name}{localModels.some((l) => l.repo === r.m.repo) ? ' ✓' : ''}</span>
+                  <span className="tiny muted">{r.q.quant} · {fmtBytes(r.q.size)} · {r.why}</span>
+                </button>
+              )) : <div className="tiny muted">Ningún modelo del catálogo cabe en tu equipo para esto.</div>}
+              {list.length > 2 && <button className="btn sm ghost" style={{ alignSelf: 'flex-start' }} onClick={() => onTask(k)}>Ver más ({list.length})</button>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ───────── Mis modelos ─────────
+const RATE_COLOR = { fluido: 'var(--green, #3a9d5d)', bueno: 'var(--teal, #2a9d8f)', lento: 'var(--amber, #d4a017)', muylento: 'var(--orange, #e07a2f)', nofit: 'var(--red, #d64545)' };
+function ContextAnalysis({ rec, current, kv, onPick }) {
+  const rows = rec.options.filter((o) => o.ctx >= 4096);
+  const cell = (o, k) => {
+    const p = o[k];
+    const on = o.ctx === current && kv === k;
+    return (
+      <td key={k} onClick={() => p.fits && onPick(o.ctx, k)} title={p.fits ? 'Usar este contexto' : 'No cabe'} style={{ padding: '4px 6px', cursor: p.fits ? 'pointer' : 'default', borderRadius: 6, outline: on ? '2px solid var(--accent, #d97757)' : 'none', opacity: p.fits ? 1 : 0.5 }}>
+        <span style={{ color: RATE_COLOR[p.rating] }}>●</span> {p.fits ? `${fmtBytes(p.gpuBytes)}${p.cpuBytes > 1.5 * GiB ? ` + ${fmtBytes(p.cpuBytes)} RAM` : ''} · ~${p.tps} t/s` : 'No cabe'}
+      </td>
+    );
+  };
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="row" style={{ marginBottom: 6 }}><strong>Análisis de contexto</strong><span className="grow" /><span className="badge">Recomendado: {fmtNum(rec.ctx)} · {rec.kvType.toUpperCase()}</span></div>
+      <div className="small muted" style={{ marginBottom: 8 }}>{rec.reason}</div>
+      <table className="small" style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 2 }}>
+        <thead><tr><th style={{ textAlign: 'left' }}>Tokens</th><th style={{ textAlign: 'left' }}>Caché F16</th><th style={{ textAlign: 'left' }}>Caché Q8_0</th></tr></thead>
+        <tbody>{rows.map((o) => <tr key={o.ctx}><td className="mono">{fmtNum(o.ctx)}{o.ctx === rec.ctx ? ' ★' : ''}</td>{cell(o, 'f16')}{cell(o, 'q8_0')}</tr>)}</tbody>
+      </table>
+      <div className="small muted" style={{ marginTop: 6 }}>Pulsa una celda para fijar ese contexto a mano. Verde = todo en GPU; ámbar/naranja = parte en RAM (más lento).</div>
+    </div>
+  );
+}
+
 function ModelSettings({ model, onClose }) {
   const { settings, toast } = useStore();
-  const [s, setS] = useState({ ctx: model.settings?.ctx || settings?.ctx || 8192, gpuLayers: model.settings?.gpuLayers ?? 'auto', kvType: model.settings?.kvType || settings?.kvType || 'f16', vision: model.settings?.vision !== false, extraArgs: model.settings?.extraArgs || '' });
+  const [s, setS] = useState({ ctxMode: model.settings?.ctxMode || (settings?.autoCtx === false ? 'manual' : 'auto'), ctx: model.settings?.ctx || settings?.ctx || 8192, gpuLayers: model.settings?.gpuLayers ?? 'auto', kvType: model.settings?.kvType || settings?.kvType || 'f16', vision: model.settings?.vision !== false, extraArgs: model.settings?.extraArgs || '' });
   const [plan, setPlan] = useState(null);
-  useEffect(() => { const t = setTimeout(() => { call('models.settings', model.id, s).then(() => call('models.plan', model.id, { ctx: s.ctx })).then(setPlan).catch(() => { }); }, 250); return () => clearTimeout(t); }, [s]);
+  useEffect(() => { const t = setTimeout(() => { call('models.settings', model.id, s).then(() => call('models.plan', model.id, s.ctxMode === 'auto' ? {} : { ctx: s.ctx })).then(setPlan).catch(() => { }); }, 250); return () => clearTimeout(t); }, [s]);
   const hw = useStore((st) => st.hw);
   const budget = hw ? staticBudget(hw) : null;
   return (
     <Drawer title={`Ajustes · ${model.name}`} onClose={onClose}>
-      <Field label={`Longitud de contexto: ${fmtNum(s.ctx)} tokens`} hint={`Máximo del modelo: ${fmtNum(model.meta?.ctxTrain || 0)}. Más contexto = más memoria (KV caché).`}>
-        <input type="range" className="slider" min={11} max={Math.max(12, Math.floor(Math.log2(model.meta?.ctxTrain || 131072)))} value={Math.log2(s.ctx)} onChange={(e) => setS({ ...s, ctx: 2 ** Number(e.target.value) })} />
+      <Field label="Contexto" hint="Automático analiza tu GPU/RAM y elige el mayor contexto que deja el modelo rápido.">
+        <Seg value={s.ctxMode} onChange={(v) => setS({ ...s, ctxMode: v, ...(v === 'manual' && plan?.rec ? { ctx: plan.rec.ctx, kvType: plan.rec.kvType } : {}) })} options={[{ value: 'auto', label: 'Automático (recomendado)' }, { value: 'manual', label: 'Manual' }]} />
       </Field>
+      {plan?.rec && <ContextAnalysis rec={plan.rec} current={s.ctxMode === 'auto' ? plan.rec.ctx : s.ctx} kv={s.ctxMode === 'auto' ? plan.rec.kvType : s.kvType} onPick={(ctx, kvType) => setS({ ...s, ctxMode: 'manual', ctx, kvType })} />}
+      {s.ctxMode === 'manual' && <Field label={`Longitud de contexto: ${fmtNum(s.ctx)} tokens`} hint={`Máximo del modelo: ${fmtNum(model.meta?.ctxTrain || 0)}. Más contexto = más memoria (KV caché).`}>
+        <input type="range" className="slider" min={11} max={Math.max(12, Math.floor(Math.log2(model.meta?.ctxTrain || 131072)))} value={Math.log2(s.ctx)} onChange={(e) => setS({ ...s, ctx: 2 ** Number(e.target.value) })} />
+      </Field>}
       <Field label="Capas en GPU" hint={`Automático reparte según tu VRAM. El modelo tiene ${model.meta?.layers || '?'} capas.`}>
         <div className="row">
           <Seg value={s.gpuLayers === 'auto' ? 'auto' : 'manual'} onChange={(v) => setS({ ...s, gpuLayers: v === 'auto' ? 'auto' : (plan?.live?.gpuLayers ?? 0) })} options={[{ value: 'auto', label: 'Automático' }, { value: 'manual', label: 'Manual' }]} />
           {s.gpuLayers !== 'auto' && <><input type="range" className="slider" min={0} max={model.meta?.layers || 99} value={s.gpuLayers} onChange={(e) => setS({ ...s, gpuLayers: Number(e.target.value) })} /><span className="mono small">{s.gpuLayers}</span></>}
         </div>
       </Field>
-      <Field label="Tipo de KV caché" hint="q8_0 reduce la memoria del contexto casi a la mitad con pérdida mínima; q4_0 aún más.">
+      {s.ctxMode === 'manual' && <Field label="Tipo de KV caché" hint="q8_0 reduce la memoria del contexto casi a la mitad con pérdida mínima; q4_0 aún más.">
         <Seg value={s.kvType} onChange={(v) => setS({ ...s, kvType: v })} options={[{ value: 'f16', label: 'F16 (máxima calidad)' }, { value: 'q8_0', label: 'Q8_0' }, { value: 'q4_0', label: 'Q4_0' }]} />
-      </Field>
+      </Field>}
       {model.mmproj && <Field label="Visión (imágenes)" hint="Carga el proyector de visión (mmproj). Desactívalo para ahorrar memoria."><Toggle value={s.vision} onChange={(v) => setS({ ...s, vision: v })} /></Field>}
       <Field label="Argumentos extra de llama-server" hint="Avanzado. Ej.: --top-k 40 --rope-scaling yarn"><input className="input mono" value={s.extraArgs} onChange={(e) => setS({ ...s, extraArgs: e.target.value })} /></Field>
       {plan && <div className="card"><div className="row" style={{ marginBottom: 10 }}><strong>Previsión de carga</strong><span className="grow" /><FitPill plan={plan.live} /></div><MemBar plan={plan.live} budget={budget} /><div className="small muted" style={{ marginTop: 8 }}>{MODE_TEXT[plan.live.mode]}. Los cambios se aplican la próxima vez que cargues el modelo.</div></div>}
@@ -283,7 +390,11 @@ function LocalModels() {
   useEffect(() => { call('models.extraDirs').then(setDirs); }, [localModels.length]);
   async function load(m) {
     setLoadingId(m.id);
-    try { await call('llama.load', m.id); toast(`${m.name} cargado`, 'success'); } catch (e) { toast(e.message, 'error', 9000); }
+    try {
+      const list = await call('llama.load', m.id);
+      const i = (list || []).find((x) => x.id === m.id);
+      toast(i?.plan?.autoCtx ? `${m.name} cargado · contexto ${fmtNum(i.ctx)} (${i.plan.kvType}). ${i.plan.reason}` : `${m.name} cargado`, 'success', 8000);
+    } catch (e) { toast(e.message, 'error', 9000); }
     setLoadingId(null);
   }
   const total = localModels.filter((m) => !m.external).reduce((a, m) => a + m.size, 0);

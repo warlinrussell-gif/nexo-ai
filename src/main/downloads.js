@@ -23,10 +23,17 @@ export class DownloadManager extends EventEmitter {
       if (j.status === 'done') continue;
       // Los motores necesitan su paso de instalación (no persistible): se reinstalan desde la interfaz
       if (j.kind === 'runtime') { for (const f of j.files || []) { try { fs.unlinkSync(f.dest + '.part'); } catch { } } continue; }
-      j.status = j.status === 'error' ? 'error' : 'paused';
-      j.speed = 0;
+      // El progreso guardado puede ser antiguo: recalcularlo con lo que hay realmente en disco
+      for (const f of j.files || []) {
+        try { f.done = fs.statSync(f.complete ? f.dest : f.dest + '.part').size; } catch { f.done = f.complete ? f.size || 0 : 0; }
+      }
+      j.received = this.totalReceived(j);
+      // Lo que se estaba descargando al cerrar la app continúa solo; lo pausado por el usuario sigue en pausa
+      j.status = j.status === 'error' ? 'error' : ['downloading', 'queued'].includes(j.status) ? 'queued' : 'paused';
+      j.speed = 0; j.eta = 0;
       this.jobs.set(j.id, j);
     }
+    setTimeout(() => this.pump(), 3000);
   }
 
   persist() {
@@ -165,6 +172,7 @@ export class DownloadManager extends EventEmitter {
               job.received = rec;
               job.eta = job.speed > 0 && job.total ? Math.round((job.total - rec) / job.speed) : 0;
               this.emitUpdate(job);
+              if (now - (job._lastPersist || 0) > 15000) { job._lastPersist = now; this.persist(); }
             }
           }
         } finally {

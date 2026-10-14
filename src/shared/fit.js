@@ -24,6 +24,13 @@ export function quantFromName(name = '') {
   return null;
 }
 
+/** Descarta cuantizaciones con tamaño imposible para los parámetros (p. ej. solo cuenta un trozo de un archivo dividido). */
+export function plausibleQuant(q, params) {
+  if (!params || !q?.size) return true;
+  const expected = params * (QUANT_BPW[q.quant] || 4.8) / 8;
+  return q.size >= expected * 0.6;
+}
+
 export function quantQuality(q) {
   const bpw = QUANT_BPW[q] || 4.8;
   if (bpw >= 8) return { label: 'Máxima', score: 5 };
@@ -183,6 +190,39 @@ export function planModel(metaIn, budget, opts = {}) {
   }
   // 4) Solo CPU / RAM
   return result('cpu', 0, 0, totalNeed + 200 * MiB, 0, act);
+}
+
+/**
+ * Recomienda el contexto (y tipo de KV caché) para un modelo según la memoria disponible.
+ * Busca el mayor contexto que deja el modelo 100% en GPU (lo más rápido), hasta `cap`.
+ * Devuelve { ctx, kvType, plan, reason, options } — options = tabla para mostrar al usuario.
+ */
+export function recommendContext(meta, budget, opts = {}) {
+  const m = normalizeMeta(meta, opts.fileSize);
+  const train = meta?.ctxTrain || 32768;
+  const cap = Math.min(train, opts.cap || Infinity);
+  const sizes = [2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144].filter((c) => c <= Math.max(train, 4096));
+  const base = { fileSize: opts.fileSize, mmprojSize: opts.mmprojSize };
+  const options = sizes.map((ctx) => ({
+    ctx,
+    f16: planModel(meta, budget, { ...base, ctx, kvType: 'f16' }),
+    q8_0: planModel(meta, budget, { ...base, ctx, kvType: 'q8_0' })
+  }));
+  const usable = options.filter((o) => o.ctx <= cap);
+  const best = (kv, test) => usable.filter((o) => test(o[kv])).pop();
+  const gpuF16 = best('f16', (p) => p.fits && p.mode === 'gpu');
+  const gpuQ8 = best('q8_0', (p) => p.fits && p.mode === 'gpu');
+  let pick;
+  // El máximo que el modelo soporta quedándose 100% en GPU; Q8_0 solo si permite más contexto
+  if (gpuQ8 && (!gpuF16 || gpuQ8.ctx > gpuF16.ctx)) pick = { ctx: gpuQ8.ctx, kvType: 'q8_0', plan: gpuQ8.q8_0, reason: `Con la caché en Q8_0 cabe entero en la GPU con ${gpuQ8.ctx.toLocaleString('es-ES')} tokens (pérdida de calidad mínima).` };
+  else if (gpuF16) pick = { ctx: gpuF16.ctx, kvType: 'f16', plan: gpuF16.f16, reason: `Máximo que cabe entero en la GPU: ${gpuF16.ctx.toLocaleString('es-ES')} tokens${gpuF16.ctx >= train ? ' (el máximo del modelo)' : ''}.` };
+  else {
+    // No cabe entero en GPU: contexto moderado y caché comprimida para no robar capas a la GPU
+    const o = usable.find((x) => x.ctx === 8192) || usable[usable.length - 1] || options[0];
+    const p = o.q8_0.fits ? o.q8_0 : o.f16;
+    pick = { ctx: o.ctx, kvType: p === o.q8_0 ? 'q8_0' : 'f16', plan: p, reason: p.fits ? `El modelo no cabe entero en tu GPU; con ${o.ctx.toLocaleString('es-ES')} tokens se reparte GPU+RAM (${p.gpuLayers}/${p.totalLayers} capas en GPU). Más contexto lo haría más lento.` : 'El modelo no cabe en la memoria disponible ni con contexto reducido. Usa una cuantización más pequeña.' };
+  }
+  return { ...pick, cap, train, options };
 }
 
 export const RATING_INFO = {

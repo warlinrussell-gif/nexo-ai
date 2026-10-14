@@ -34,7 +34,8 @@ export function createChat(data = {}) {
     id: uid('c_'), title: data.title || 'Nuevo chat', createdAt: Date.now(), updatedAt: Date.now(),
     agentId: data.agentId || 'assistant', model: data.model || null, mode: data.mode || 'chat',
     compareModels: data.compareModels || [], pipeline: data.pipeline || [], pinned: false,
-    toolsOverride: null, permissionMode: null, messages: [], folder: data.folder || null
+    toolsOverride: null, permissionMode: null, messages: [], folder: data.folder || null,
+    workspace: data.workspace || null, opencodeModel: data.opencodeModel ?? null, opencodeVariant: data.opencodeVariant ?? null, reasoningEffort: data.reasoningEffort || null
   };
   chats.set(chat.id, chat);
   getIndex().push(meta(chat));
@@ -62,7 +63,7 @@ export function saveChat(chat, immediate = false) {
 export function updateChat(id, patch) {
   const c = getChat(id);
   if (!c) return null;
-  const allowed = ['title', 'agentId', 'model', 'mode', 'compareModels', 'pipeline', 'pinned', 'toolsOverride', 'permissionMode', 'folder', 'reasoningEffort', 'temperature'];
+  const allowed = ['title', 'agentId', 'model', 'mode', 'compareModels', 'pipeline', 'pinned', 'toolsOverride', 'permissionMode', 'folder', 'reasoningEffort', 'temperature', 'workspace', 'opencodeModel', 'opencodeSession', 'opencodeVariant'];
   for (const k of allowed) if (patch[k] !== undefined) c[k] = patch[k];
   saveChat(c, true);
   return c;

@@ -30,7 +30,7 @@ const READ_SCRIPT = `(() => {
 })()`;
 
 class BrowserController extends EventEmitter {
-  constructor() { super(); this.view = null; this.win = null; this.bounds = null; this.visible = false; }
+  constructor() { super(); this.view = null; this.win = null; this.bounds = null; this.visible = false; this.logs = []; }
 
   attach(win) { this.win = win; }
 
@@ -44,6 +44,13 @@ class BrowserController extends EventEmitter {
     wc.on('did-navigate', upd); wc.on('did-navigate-in-page', upd); wc.on('page-title-updated', upd);
     wc.on('did-start-loading', upd); wc.on('did-stop-loading', upd);
     wc.on('did-fail-load', (_e, code, desc, url) => { if (code !== -3) this.emit('state', { ...this.state(), error: `${desc} (${url})` }); });
+    wc.on('console-message', (e, level, message, line, source) => {
+      const lv = e?.level ?? level; const msg = e?.message ?? message;
+      const name = typeof lv === 'string' ? lv : ['debug', 'info', 'warning', 'error'][lv] || 'log';
+      this.logs.push(`[${name}] ${String(msg).slice(0, 500)}${(e?.sourceId ?? source) ? ` (${String(e?.sourceId ?? source).split('/').pop()}:${e?.lineNumber ?? line})` : ''}`);
+      if (this.logs.length > 200) this.logs.splice(0, this.logs.length - 200);
+    });
+    wc.on('did-navigate', () => { this.logs = []; });
     this.view.setBackgroundColor('#ffffff');
     if (this.visible && this.bounds) this.show(this.bounds);
     return this.view;
@@ -87,19 +94,108 @@ class BrowserController extends EventEmitter {
     await sleep(500);
   }
 
-  async read({ maxChars = 12000 } = {}) {
+  async read({ maxChars = 12000, offset = 0 } = {}) {
     const wc = this.ensure().webContents;
     if (!wc.getURL()) return { url: '', title: '', text: '(navegador vacío — usa action=navigate)', elements: '' };
     const r = await wc.executeJavaScript(READ_SCRIPT, true);
-    return { ...r, text: truncate(r.text, maxChars) };
+    const total = r.text.length;
+    const from = Math.max(0, Math.min(offset, total));
+    const to = Math.min(total, from + maxChars);
+    return { ...r, text: r.text.slice(from, to), from, to, total, more: from > 0 || to < total };
+  }
+
+  /** Busca un texto en la página: fragmentos donde aparece y elementos interactivos que lo contienen. */
+  async find(query) {
+    const q = String(query || '').trim();
+    if (!q) throw new Error('Indica text con lo que buscar');
+    const r = await this.read({ maxChars: 1e9 });
+    const low = r.text.toLowerCase(), ql = q.toLowerCase();
+    const hits = [];
+    for (let i = low.indexOf(ql); i >= 0 && hits.length < 15; i = low.indexOf(ql, i + ql.length)) hits.push(`…${r.text.slice(Math.max(0, i - 80), i + ql.length + 80).replace(/\s+/g, ' ')}… (offset ${Math.max(0, i - 200)})`);
+    const els = r.elements.split('\n').filter((l) => l.toLowerCase().includes(ql)).slice(0, 25);
+    if (!hits.length && !els.length) return `"${q}" no aparece en la página (${r.url}).`;
+    return `Resultados para "${q}" en ${r.url}:\n\n## En el texto (${hits.length})\n${hits.join('\n') || '—'}\n\n## Elementos interactivos\n${els.join('\n') || '—'}`;
+  }
+
+  async hover(index) {
+    const wc = this.ensure().webContents;
+    const pos = await this.elementCenter(index);
+    wc.sendInputEvent({ type: 'mouseMove', x: pos.x, y: pos.y });
+    await sleep(400);
+    return this.state();
+  }
+
+  async elementCenter(index) {
+    const wc = this.ensure().webContents;
+    const pos = await wc.executeJavaScript(`(() => { const el = document.querySelector('[data-nexo-id="${Number(index)}"]'); if (!el) return null; el.scrollIntoView({block:'center', inline:'center'}); const r = el.getBoundingClientRect(); return { x: r.left + r.width/2, y: r.top + r.height/2 }; })()`, true);
+    if (!pos) throw new Error(`Elemento [${index}] no encontrado. Usa action=read para actualizar la lista.`);
+    await sleep(100);
+    return { x: Math.round(pos.x), y: Math.round(pos.y) };
+  }
+
+  /** Rellena varios campos de un formulario: [{ index, value }]. */
+  async fill(fields) {
+    if (!Array.isArray(fields) || !fields.length) throw new Error('Indica fields: [{index, value}]');
+    const wc = this.ensure().webContents;
+    const out = [];
+    for (const f of fields) {
+      const kind = await wc.executeJavaScript(`(() => { const el = document.querySelector('[data-nexo-id="${Number(f.index)}"]'); if (!el) return null; const t = (el.type || '').toLowerCase(); if (el.tagName === 'SELECT') return 'select'; if (t === 'checkbox' || t === 'radio' || el.getAttribute('role') === 'checkbox') return 'check'; return 'text'; })()`, true);
+      if (!kind) { out.push(`[${f.index}] no encontrado`); continue; }
+      if (kind === 'select') { out.push(await this.select(f.index, f.value)); continue; }
+      if (kind === 'check') {
+        const want = !/^(false|0|no|off)$/i.test(String(f.value));
+        const changed = await wc.executeJavaScript(`(() => { const el = document.querySelector('[data-nexo-id="${Number(f.index)}"]'); const cur = el.checked ?? el.getAttribute('aria-checked') === 'true'; if (cur !== ${want}) { el.click(); return true; } return false; })()`, true);
+        out.push(`[${f.index}] ${want ? 'marcado' : 'desmarcado'}${changed ? '' : ' (ya lo estaba)'}`);
+        continue;
+      }
+      await this.type(f.index, String(f.value ?? ''), false);
+      out.push(`[${f.index}] = "${String(f.value).slice(0, 60)}"`);
+    }
+    return `Formulario rellenado:\n${out.join('\n')}`;
+  }
+
+  /** Elige una opción de un <select> por texto o valor. */
+  async select(index, value) {
+    const wc = this.ensure().webContents;
+    const r = await wc.executeJavaScript(`(() => {
+      const el = document.querySelector('[data-nexo-id="${Number(index)}"]');
+      if (!el) return { err: 'no encontrado' };
+      if (el.tagName !== 'SELECT') return { err: 'no es un desplegable <select>; usa click para abrirlo y click en la opción' };
+      const v = ${JSON.stringify(String(value ?? ''))}.toLowerCase().trim();
+      const opts = [...el.options];
+      const o = opts.find(o => o.value.toLowerCase() === v || o.text.trim().toLowerCase() === v) || opts.find(o => o.text.toLowerCase().includes(v));
+      if (!o) return { err: 'opción no encontrada. Opciones: ' + opts.map(o => o.text.trim()).slice(0, 30).join(' | ') };
+      el.value = o.value; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok: o.text.trim() };
+    })()`, true);
+    if (r.err) throw new Error(`[${index}] ${r.err}`);
+    return `[${index}] seleccionado: ${r.ok}`;
+  }
+
+  /** Espera unos segundos o hasta que aparezca un texto en la página (máx. 30 s). */
+  async wait({ seconds, text } = {}) {
+    const wc = this.ensure().webContents;
+    if (text) {
+      const t0 = Date.now();
+      while (Date.now() - t0 < Math.min(30, seconds || 15) * 1000) {
+        const found = await wc.executeJavaScript(`(document.body?.innerText || '').toLowerCase().includes(${JSON.stringify(String(text).toLowerCase())})`, true).catch(() => false);
+        if (found) return `"${text}" ya aparece en la página (${((Date.now() - t0) / 1000).toFixed(1)} s)`;
+        await sleep(500);
+      }
+      return `"${text}" no apareció tras ${Math.min(30, seconds || 15)} s`;
+    }
+    await sleep(Math.min(30, seconds || 2) * 1000);
+    await this.waitIdle(4000);
+    return `Esperado ${Math.min(30, seconds || 2)} s`;
+  }
+
+  consoleLog() {
+    return this.logs.length ? `Consola (${this.logs.length} mensajes, los más recientes al final):\n${this.logs.slice(-80).join('\n')}` : 'La consola está vacía.';
   }
 
   async click(index) {
     const wc = this.ensure().webContents;
-    const pos = await wc.executeJavaScript(`(() => { const el = document.querySelector('[data-nexo-id="${Number(index)}"]'); if (!el) return null; el.scrollIntoView({block:'center', inline:'center'}); const r = el.getBoundingClientRect(); return { x: r.left + r.width/2, y: r.top + r.height/2 }; })()`, true);
-    if (!pos) throw new Error(`Elemento [${index}] no encontrado. Usa action=read para actualizar la lista.`);
-    await sleep(120);
-    const x = Math.round(pos.x), y = Math.round(pos.y);
+    const { x, y } = await this.elementCenter(index);
     wc.sendInputEvent({ type: 'mouseMove', x, y });
     wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
     wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
