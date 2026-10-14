@@ -4,7 +4,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { shell, clipboard, Notification, screen } from 'electron';
+import { app, shell, clipboard, Notification, screen } from 'electron';
 import { isWin, isMac, truncate, run, uid } from './util.js';
 import { dir } from './paths.js';
 import * as computer from './computer.js';
@@ -77,12 +77,75 @@ async function walk(root, { pattern, content, max = 200, depth = 8 }) {
   return results;
 }
 
+// Convierte un patrón glob (src/**/*.js, *.{ts,tsx}) en regex sobre la ruta relativa con "/"
+function globRe(glob) {
+  let g = String(glob).replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!g.includes('/')) g = '**/' + g;
+  let re = '';
+  for (let i = 0; i < g.length; i++) {
+    const ch = g[i];
+    if (ch === '*') { if (g[i + 1] === '*') { i++; if (g[i + 1] === '/') { i++; re += '(?:.*/)?'; } else re += '.*'; } else re += '[^/]*'; }
+    else if (ch === '?') re += '[^/]';
+    else if (ch === '{') { const j = g.indexOf('}', i); if (j > i) { re += '(?:' + g.slice(i + 1, j).split(',').map((x) => x.replace(/[.+^$()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*')).join('|') + ')'; i = j; } else re += '\\{'; }
+    else re += ch.replace(/[.+^$()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp('^' + re + '$', 'i');
+}
+
+const SKIP_DIRS = new Set(['node_modules', '.git', '$Recycle.Bin', '__pycache__', '.venv', 'venv', 'System Volume Information', 'dist', 'release', '.next', 'target', '.cache']);
+
+// Recorre archivos bajo root; devuelve rutas relativas con "/" (sin carpetas ignoradas)
+async function listFiles(root, { re, max = 20000 }) {
+  const out = [];
+  const stack = [''];
+  while (stack.length && out.length < max) {
+    const rel = stack.pop();
+    let entries;
+    try { entries = await fsp.readdir(path.join(root, rel), { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      const r = rel ? rel + '/' + e.name : e.name;
+      if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) stack.push(r); continue; }
+      if (!re || re.test(r)) out.push(r);
+    }
+  }
+  return out;
+}
+
+let rgPath;
+async function ripgrep() {
+  if (rgPath !== undefined) return rgPath;
+  const r = await execCommand(isWin ? '(Get-Command rg -ErrorAction SilentlyContinue).Source' : 'command -v rg', { timeout: 10 });
+  rgPath = r.out.trim().split(/\r?\n/)[0] || null;
+  return rgPath;
+}
+
+function rgRun(bin, args, cwd, signal) {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, { cwd, windowsHide: true });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d.toString(); if (out.length > 4e6) child.kill(); });
+    child.stderr.on('data', () => { });
+    signal?.addEventListener('abort', () => child.kill(), { once: true });
+    child.on('close', (code) => resolve({ code, out }));
+    child.on('error', () => resolve({ code: -1, out: null }));
+  });
+}
+
 function fmtSize(n) { return n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n > 1e3 ? (n / 1e3).toFixed(0) + ' KB' : n + ' B'; }
 
 /** Construye la lista de herramientas integradas. ctx: { settings, workspace, delegate, emitPlan, agents } */
 export function builtinTools(ctx) {
   const cwdDefault = () => ctx.workspace || os.homedir();
   const T = [];
+  const readStamps = ctx.readStamps || (ctx.readStamps = new Map());
+  // Si el archivo cambió fuera (usuario/otro proceso) desde la última lectura, el modelo trabajaría sobre texto viejo
+  const assertFresh = async (p) => {
+    const t = readStamps.get(p);
+    if (t === undefined) return;
+    const st = await fsp.stat(p).catch(() => null);
+    if (st && st.mtimeMs > t + 1) throw new Error('El archivo cambió desde que lo leíste (lo modificó el usuario u otro proceso). Vuelve a leerlo con read_file antes de editarlo.');
+  };
+  const stamp = async (p) => { const st = await fsp.stat(p).catch(() => null); if (st) readStamps.set(p, st.mtimeMs); };
   const add = (group, risk, name, description, properties, required, runFn) => T.push({ group, risk, name, description, parameters: { type: 'object', properties, required }, run: runFn });
 
   // ─── Archivos ───
@@ -96,6 +159,7 @@ export function builtinTools(ctx) {
     if (IMG_EXT[ext]) { const data = (await fsp.readFile(p)).toString('base64'); return { text: `Imagen ${path.basename(p)} (${fmtSize(st.size)})`, images: [{ data, mime: IMG_EXT[ext] }] }; }
     if (st.size > 20e6) throw new Error('Archivo demasiado grande para leerlo entero (' + fmtSize(st.size) + '). Usa run_command para procesarlo.');
     const buf = await fsp.readFile(p);
+    readStamps.set(p, st.mtimeMs);
     if (buf.subarray(0, 8000).includes(0)) return `Archivo binario (${fmtSize(st.size)}). No se puede mostrar como texto.`;
     const lines = buf.toString('utf8').split('\n');
     const off = Math.max(1, a.offset || 1), lim = Math.min(2000, a.limit || 400);
@@ -124,12 +188,14 @@ export function builtinTools(ctx) {
     await c.checkpoint?.(p);
     await fsp.mkdir(path.dirname(p), { recursive: true });
     if (a.append) await fsp.appendFile(p, a.content); else await fsp.writeFile(p, a.content);
+    await stamp(p);
     return `Archivo ${a.append ? 'actualizado' : 'guardado'}: ${p} (${fmtSize(Buffer.byteLength(a.content))})`;
   });
   add('files', 'write', 'edit_file', 'Edita un archivo reemplazando un fragmento exacto de texto por otro. old_text debe ser único salvo que replace_all=true.', {
     path: { type: 'string' }, old_text: { type: 'string' }, new_text: { type: 'string' }, replace_all: { type: 'boolean' }
   }, ['path', 'old_text', 'new_text'], async (a, c) => {
     const p = expand(a.path, cwdDefault());
+    await assertFresh(p);
     const txt = await fsp.readFile(p, 'utf8');
     // tolerar finales de línea CRLF cuando el modelo envía LF
     let oldT = a.old_text, newT = a.new_text;
@@ -140,6 +206,7 @@ export function builtinTools(ctx) {
     await c.checkpoint?.(p);
     const out = a.replace_all ? txt.split(oldT).join(newT) : txt.replace(oldT, () => newT);
     await fsp.writeFile(p, out);
+    await stamp(p);
     // fragmento resultante con números de línea para que el modelo verifique el cambio
     const at = out.indexOf(newT);
     const startLine = at >= 0 ? out.slice(0, at).split('\n').length : 1;
@@ -147,6 +214,93 @@ export function builtinTools(ctx) {
     const from = Math.max(1, startLine - 3), to = Math.min(lines.length, startLine + newT.split('\n').length + 2);
     const snippet = lines.slice(from - 1, to).map((l, i) => `${String(from + i).padStart(5)}| ${l.replace(/\r$/, '')}`).join('\n');
     return `Editado ${p} (${a.replace_all ? count : 1} reemplazo/s). Resultado:\n${snippet}`;
+  });
+  add('files', 'write', 'multi_edit', 'Aplica varias ediciones a UN archivo de una sola vez (todas o ninguna). Cada edición reemplaza old_text exacto por new_text, en orden, sobre el resultado de la anterior. Úsalo en lugar de varias llamadas a edit_file.', {
+    path: { type: 'string' },
+    edits: { type: 'array', items: { type: 'object', properties: { old_text: { type: 'string' }, new_text: { type: 'string' }, replace_all: { type: 'boolean' } }, required: ['old_text', 'new_text'] } }
+  }, ['path', 'edits'], async (a, c) => {
+    const p = expand(a.path, cwdDefault());
+    await assertFresh(p);
+    let txt = await fsp.readFile(p, 'utf8');
+    const crlf = txt.includes('\r\n');
+    let n = 0;
+    (a.edits || []).forEach((e, i) => {
+      let oldT = e.old_text, newT = e.new_text;
+      if (oldT && !txt.includes(oldT) && crlf && oldT.includes('\n')) { oldT = oldT.replace(/\r?\n/g, '\r\n'); newT = newT.replace(/\r?\n/g, '\r\n'); }
+      const count = oldT ? txt.split(oldT).length - 1 : 0;
+      if (!count) throw new Error(`Edición ${i + 1}: old_text no se encontró (no se aplicó ningún cambio). Relee el archivo y copia el texto exacto.`);
+      if (count > 1 && !e.replace_all) throw new Error(`Edición ${i + 1}: old_text aparece ${count} veces; añade contexto o usa replace_all (no se aplicó ningún cambio).`);
+      txt = e.replace_all ? txt.split(oldT).join(newT) : txt.replace(oldT, () => newT);
+      n += e.replace_all ? count : 1;
+    });
+    await c.checkpoint?.(p);
+    await fsp.writeFile(p, txt);
+    await stamp(p);
+    return `Editado ${p}: ${(a.edits || []).length} ediciones (${n} reemplazos). Usa read_file si necesitas comprobar el resultado.`;
+  });
+  add('files', 'read', 'glob', 'Encuentra archivos por patrón glob (p. ej. "**/*.tsx", "src/**/test_*.py", "*.{js,ts}") dentro de una carpeta. Rápido; ignora node_modules, .git, dist… Devuelve rutas ordenadas por fecha de modificación (más recientes primero).', {
+    pattern: { type: 'string' }, path: { type: 'string', description: 'Carpeta raíz (por defecto: directorio de trabajo)' }
+  }, ['pattern'], async (a) => {
+    const root = expand(a.path, cwdDefault());
+    const files = await listFiles(root, { re: globRe(a.pattern) });
+    const withT = await Promise.all(files.slice(0, 5000).map(async (f) => [f, (await fsp.stat(path.join(root, f)).catch(() => null))?.mtimeMs || 0]));
+    withT.sort((x, y) => y[1] - x[1]);
+    if (!withT.length) return `Sin coincidencias para ${a.pattern} en ${root}`;
+    return `${root}\n${withT.slice(0, 300).map((x) => x[0]).join('\n')}${withT.length > 300 ? `\n[… ${withT.length - 300} más; afina el patrón]` : ''}`;
+  });
+  add('files', 'read', 'grep', 'Busca texto con expresiones regulares dentro de los archivos (como ripgrep). output_mode: "files" (solo rutas, por defecto), "content" (líneas con número; admite context), "count". Filtra con glob (p. ej. "*.js") o type (js, py, ts…). La herramienta preferida para encontrar código.', {
+    pattern: { type: 'string', description: 'Regex' }, path: { type: 'string', description: 'Carpeta o archivo (por defecto: directorio de trabajo)' },
+    glob: { type: 'string' }, type: { type: 'string' }, output_mode: { type: 'string', enum: ['files', 'content', 'count'] },
+    context: { type: 'integer', description: 'Líneas de contexto antes y después (modo content)' }, ignore_case: { type: 'boolean' }, max_results: { type: 'integer' }
+  }, ['pattern'], async (a, c) => {
+    const target = expand(a.path, cwdDefault());
+    const mode = a.output_mode || 'files';
+    const max = Math.min(1000, a.max_results || (mode === 'content' ? 200 : 300));
+    const ctxN = Math.min(10, Math.max(0, a.context || 0));
+    const rg = await ripgrep();
+    if (rg) {
+      const args = ['--no-heading', '--color', 'never', '--max-columns', '400'];
+      if (a.ignore_case) args.push('-i');
+      if (a.glob) args.push('-g', a.glob);
+      if (a.type) args.push('-t', a.type);
+      if (mode === 'files') args.push('-l'); else if (mode === 'count') args.push('-c'); else { args.push('-n'); if (ctxN) args.push('-C', String(ctxN)); }
+      args.push('-e', a.pattern, target);
+      const r = await rgRun(rg, args, cwdDefault(), c?.signal);
+      if (r.out !== null && r.code !== 2) {
+        const lines = r.out.split(/\r?\n/).filter(Boolean);
+        if (!lines.length) return 'Sin resultados';
+        return lines.slice(0, max).join('\n') + (lines.length > max ? `\n[… ${lines.length - max} más; afina la búsqueda]` : '');
+      }
+    }
+    // Sin ripgrep: búsqueda propia
+    let re;
+    try { re = new RegExp(a.pattern, a.ignore_case ? 'i' : ''); } catch (e) { throw new Error('Regex no válida: ' + e.message); }
+    const TYPES = { js: 'js,mjs,cjs,jsx', ts: 'ts,tsx', py: 'py', java: 'java', cs: 'cs', go: 'go', rust: 'rs', cpp: 'cpp,cc,h,hpp,c', html: 'html,htm', css: 'css,scss', json: 'json', md: 'md' };
+    const fre = a.glob ? globRe(a.glob) : a.type ? globRe(`*.{${TYPES[a.type] || a.type}}`) : null;
+    const st0 = await fsp.stat(target);
+    const files = st0.isFile() ? [''] : await listFiles(target, { re: fre });
+    const out = [];
+    for (const f of files) {
+      if (out.length >= max || c?.signal?.aborted) break;
+      const fp = f ? path.join(target, f) : target;
+      let txt;
+      try { const st = await fsp.stat(fp); if (st.size > 3e6) continue; const b = await fsp.readFile(fp); if (b.subarray(0, 4000).includes(0)) continue; txt = b.toString('utf8'); } catch { continue; }
+      const lines = txt.split(/\r?\n/);
+      const hits = [];
+      for (let i = 0; i < lines.length; i++) if (re.test(lines[i])) hits.push(i);
+      if (!hits.length) continue;
+      if (mode === 'files') out.push(fp);
+      else if (mode === 'count') out.push(`${fp}:${hits.length}`);
+      else {
+        const shown = new Set();
+        for (const h of hits) for (let k = Math.max(0, h - ctxN); k <= Math.min(lines.length - 1, h + ctxN); k++) {
+          if (shown.has(k)) continue; shown.add(k);
+          out.push(`${fp}:${k + 1}${k === h ? ':' : '-'} ${lines[k].slice(0, 400)}`);
+          if (out.length >= max) break;
+        }
+      }
+    }
+    return out.length ? out.join('\n') + (out.length >= max ? '\n[límite alcanzado; afina la búsqueda]' : '') : 'Sin resultados';
   });
   add('files', 'read', 'list_directory', 'Lista el contenido de una carpeta (nombre, tipo, tamaño, fecha). depth>1 para ver subcarpetas.', {
     path: { type: 'string', description: 'Carpeta (por defecto: directorio de trabajo). Admite ~ y %VARIABLES%' }, depth: { type: 'integer' }
@@ -242,7 +396,7 @@ export function builtinTools(ctx) {
     return [
       `Sistema: ${os.type()} ${os.release()} (${process.arch}) · Equipo: ${os.hostname()} · Usuario: ${os.userInfo().username}`,
       `Fecha y hora: ${new Date().toLocaleString('es-ES')} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`,
-      `Carpeta personal: ${os.homedir()} · Escritorio: ${path.join(os.homedir(), 'Desktop')} · Descargas: ${path.join(os.homedir(), 'Downloads')} · Documentos: ${path.join(os.homedir(), 'Documents')}`,
+      `Carpeta personal: ${os.homedir()} · Escritorio: ${app.getPath('desktop')} · Descargas: ${app.getPath('downloads')} · Documentos: ${app.getPath('documents')}`,
       `Directorio de trabajo de Nexo: ${cwdDefault()}`,
       `Pantalla principal: ${Math.round(d.size.width * d.scaleFactor)}x${Math.round(d.size.height * d.scaleFactor)} (escala ${d.scaleFactor * 100}%) · Pantallas: ${screen.getAllDisplays().length}`,
       hw ? `CPU: ${hw.cpu.name} (${hw.cpu.physical} núcleos) · RAM: ${(hw.ram.total / 2 ** 30).toFixed(0)} GB (libre ${(os.freemem() / 2 ** 30).toFixed(1)} GB) · GPU: ${hw.gpus.map((g) => `${g.name} ${(g.vram / 2 ** 30).toFixed(0)}GB`).join(', ') || 'ninguna'}` : '',
@@ -402,8 +556,40 @@ export function needsApproval(tool, mode, allowAlways = {}) {
   return true; // 'ask': todo lo que no sea lectura
 }
 
+// Herramientas MCP "bajo demanda": si son muchas, el modelo solo ve sus nombres y carga
+// los esquemas con tool_search cuando las necesita (como Claude Code). Ahorra decenas de miles de tokens.
+const DEFER_CHARS = 12000;
+
 export function allTools(ctx, groups, mcpServers) {
   const list = builtinTools(ctx).filter((t) => t.group === 'core' || groups.includes(t.group));
-  if (groups.includes('mcp')) list.push(...mcp.tools(mcpServers === 'all' || !mcpServers ? undefined : mcpServers));
+  if (!groups.includes('mcp')) return list;
+  const mcpTools = mcp.tools(mcpServers === 'all' || !mcpServers ? undefined : mcpServers);
+  const size = JSON.stringify(mcpTools.map((t) => [t.name, t.description, t.parameters])).length;
+  const pref = ctx.settings?.().mcpDeferred ?? 'auto';
+  if (!mcpTools.length || pref === false || (pref === 'auto' && size < DEFER_CHARS)) { list.push(...mcpTools); return list; }
+  const loaded = new Set();
+  const byServer = {};
+  for (const t of mcpTools) (byServer[t.server] ||= []).push(t.name.split('__').pop());
+  const catalog = Object.entries(byServer).map(([srv, names]) => `${srv}: ${names.join(', ')}`).join('\n');
+  list.push({
+    group: 'core', risk: 'read', name: 'tool_search',
+    description: `Carga herramientas MCP para poder usarlas. Hay ${mcpTools.length} disponibles sin cargar (así se ahorra contexto). Pasa query="select:nombre1,nombre2" con nombres exactos, o palabras clave para buscar. Una vez cargadas, llámalas con su nombre completo mcp__servidor__herramienta.\nDisponibles por servidor:\n${catalog}`.slice(0, 6000),
+    parameters: { type: 'object', properties: { query: { type: 'string' }, max_results: { type: 'integer' } }, required: ['query'] },
+    run: async (a) => {
+      const q = String(a.query || '').trim();
+      let found;
+      if (q.startsWith('select:')) {
+        const want = q.slice(7).split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+        found = mcpTools.filter((t) => want.some((w) => t.name.toLowerCase() === w || t.name.toLowerCase().endsWith('__' + w)));
+      } else {
+        const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+        found = mcpTools.map((t) => { const h = (t.name + ' ' + t.description).toLowerCase(); return [t, words.reduce((n, w) => n + (h.includes(w) ? (t.name.toLowerCase().includes(w) ? 3 : 1) : 0), 0)]; })
+          .filter((x) => x[1] > 0).sort((x, y) => y[1] - x[1]).slice(0, Math.min(15, a.max_results || 6)).map((x) => x[0]);
+      }
+      if (!found.length) return 'Ninguna herramienta coincide. Revisa la lista de la descripción de tool_search.';
+      for (const t of found) if (!loaded.has(t.name)) { loaded.add(t.name); list.push(t); }
+      return `Cargadas ${found.length} herramientas (ya puedes llamarlas):\n${found.map((t) => `- ${t.name}: ${t.description.slice(0, 200)}`).join('\n')}`;
+    }
+  });
   return list;
 }

@@ -6,7 +6,7 @@ import { fileUrl, copyText, fmtBytes, call } from '../lib/api.js';
 import { useStore } from '../lib/store.js';
 
 const TOOL_LABELS = {
-  read_file: 'Leer archivo', write_file: 'Escribir archivo', edit_file: 'Editar archivo', list_directory: 'Listar carpeta', search_files: 'Buscar archivos', move_path: 'Mover', delete_path: 'Eliminar',
+  read_file: 'Leer archivo', write_file: 'Escribir archivo', edit_file: 'Editar archivo', list_directory: 'Listar carpeta', search_files: 'Buscar archivos', grep: 'Buscar en el código', glob: 'Buscar archivos', multi_edit: 'Editar archivo', tool_search: 'Cargar herramientas', move_path: 'Mover', delete_path: 'Eliminar',
   run_command: 'Terminal', open_app: 'Abrir', system_info: 'Info del sistema', list_processes: 'Procesos', kill_process: 'Terminar proceso', clipboard_read: 'Leer portapapeles', clipboard_write: 'Copiar al portapapeles', notify: 'Notificación',
   computer: 'Control del PC', web_search: 'Búsqueda web', fetch_url: 'Leer página', browser: 'Navegador', memory_save: 'Recordar', memory_forget: 'Olvidar', use_skill: 'Skill', update_plan: 'Plan', delegate_task: 'Delegar',
   process_output: 'Salida de proceso', ask_user: 'Pregunta al usuario'
@@ -27,6 +27,10 @@ export function toolSummary(b) {
     case 'run_command': return `$ ${a.command || ''}`;
     case 'read_file': case 'write_file': case 'edit_file': case 'delete_path': return a.path;
     case 'list_directory': return a.path || 'directorio de trabajo';
+    case 'grep': return [`"${a.pattern}"`, a.glob, a.path && `en ${a.path}`].filter(Boolean).join(' ');
+    case 'glob': return [a.pattern, a.path && `en ${a.path}`].filter(Boolean).join(' ');
+    case 'multi_edit': return `${a.path} (${(a.edits || []).length} cambios)`;
+    case 'tool_search': return a.query;
     case 'search_files': return [a.pattern, a.content && `"${a.content}"`, a.path && `en ${a.path}`].filter(Boolean).join(' ');
     case 'move_path': return `${a.from} → ${a.to}`;
     case 'open_app': return a.target;

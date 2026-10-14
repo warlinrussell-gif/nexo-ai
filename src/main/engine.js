@@ -149,7 +149,7 @@ export class Engine extends EventEmitter {
     const ws = this.workspaceFor(chat);
     let sp = agent.systemPrompt || '';
     sp += `\n\n## Entorno\n- Fecha y hora: ${now.toLocaleString('es-ES', { dateStyle: 'full', timeStyle: 'short' })} (${Intl.DateTimeFormat().resolvedOptions().timeZone})\n- Sistema: ${os.type()} ${os.release()} · Usuario: ${os.userInfo().username} · Carpeta personal: ${os.homedir()}\n- Directorio de trabajo${chat?.workspace ? ' de este chat (proyecto)' : ' por defecto'}: ${ws}\n- Idioma: responde en el idioma del usuario (por defecto, español).`;
-    if (toolsOn) sp += `\n\n## Uso de herramientas\n- Tienes herramientas REALES que actúan sobre el ordenador del usuario. Úsalas directamente en lugar de explicar cómo hacerlo, salvo que te pidan solo explicación.\n- Encadena varias herramientas si hace falta; si una falla, lee el error y prueba otra vía.\n- Para tareas de 3 o más pasos, muestra un plan con update_plan y actualízalo.\n- Antes de editar un archivo, léelo (read_file) y copia el texto exacto en edit_file. Tras cambiar código, verifica (compilar, tests o ejecutar).\n- Para buscar en archivos usa search_files/list_directory en lugar de comandos. Los procesos largos (servidores) van con background=true y su salida se lee con process_output.\n- Si la petición es ambigua o hay una decisión que solo el usuario puede tomar, usa ask_user en vez de adivinar.\n- No inventes resultados: básate en lo que devuelven las herramientas.`;
+    if (toolsOn) sp += `\n\n## Uso de herramientas\n- Tienes herramientas REALES que actúan sobre el ordenador del usuario. Úsalas directamente en lugar de explicar cómo hacerlo, salvo que te pidan solo explicación.\n- Encadena varias herramientas si hace falta; si una falla, lee el error y prueba otra vía.\n- Para tareas de 3 o más pasos, muestra un plan con update_plan al empezar y actualízalo al terminar cada paso (exactamente un paso in_progress a la vez; márcalo done en cuanto acabe, no al final de todo).\n- Antes de editar un archivo, léelo (read_file) y copia el texto exacto en edit_file; para varios cambios en el mismo archivo usa multi_edit. Tras cambiar código, verifica (compilar, tests o ejecutar) y corrige hasta que funcione.\n- Para encontrar código usa grep (contenido, regex) y glob (nombres de archivo) en lugar de comandos de terminal; son rápidos e ignoran node_modules/.git. Haz varias búsquedas independientes en la misma respuesta cuando puedas.\n- Cambios mínimos y precisos: no reescribas archivos enteros para cambiar unas líneas, y sigue el estilo del código existente.\n- Si hay herramientas MCP sin cargar, aparecen en tool_search: cárgalas con query="select:nombre" antes de usarlas.\n- Para explorar a fondo un proyecto grande o investigar algo aparte, delega en el agente explorer con delegate_task (si está disponible) para no llenar tu contexto. Los procesos largos (servidores) van con background=true y su salida se lee con process_output.\n- Si la petición es ambigua o hay una decisión que solo el usuario puede tomar, usa ask_user en vez de adivinar.\n- No inventes resultados: básate en lo que devuelven las herramientas.`;
     const instr = projectInstructions(ws);
     if (instr.length) sp += `\n\n## Instrucciones del proyecto\nEl usuario ha dejado estas instrucciones en archivos del proyecto. Síguelas siempre:\n${instr.map((f) => `\n### ${f.path}\n${f.text}`).join('\n')}`;
     sp += `\n- Formatea con Markdown cuando ayude (títulos, listas, tablas, bloques de código con lenguaje).`;
@@ -422,7 +422,9 @@ export class Engine extends EventEmitter {
       agents: () => listAgents().filter((a) => a.id !== agent.id),
       delegate: depth < 2 && groups.includes('agents') ? (args, c) => this.delegate(args, { chatId, parentRef: ref, sink: c.sink, signal, depth, chat }) : null
     };
-    const tools = s.toolsEnabled === false ? [] : allTools(toolCtx, groups, agent.mcpServers);
+    let tools = s.toolsEnabled === false ? [] : allTools(toolCtx, groups, agent.mcpServers);
+    // agentes de solo lectura (explorer): ninguna herramienta que escriba o ejecute
+    if (agent.readOnly) tools = tools.filter((t) => t.risk === 'read' && !['memory_save', 'memory_forget', 'clipboard_write', 'notify'].includes(t.name));
     const resolved = await this.resolveTarget(ref, (st) => { sink.status('loading-model'); });
     sink.setModel(resolved);
     const sys = { role: 'system', content: this.systemPrompt(agent, { toolsOn: tools.length > 0, stage, chat }) };
@@ -432,7 +434,8 @@ export class Engine extends EventEmitter {
     const mode = chat?.permissionMode || s.permissions?.mode || 'smart';
     const allowAlways = chat?.allowAlways || {};
     const maxSteps = agent.maxSteps || 30;
-    const toolsSize = JSON.stringify(tools.map((t) => [t.name, t.description, t.parameters])).length;
+    const measureTools = () => JSON.stringify(tools.map((t) => [t.name, t.description, t.parameters])).length;
+    let toolsSize = measureTools();
     let finalText = '';
     let step = sink.nextStep();
     const repeats = new Map();
@@ -512,6 +515,8 @@ export class Engine extends EventEmitter {
           if (loopy >= 5) { convo.push(...results); sink.notice('Detuve un bucle: el modelo repetía la misma acción sin avanzar.'); step = sink.nextStep(); finished = await this.finalAnswer({ convo, resolved, sink, signal, step, agent, chat }); break; }
         }
         convo.push(...results);
+        // tool_search pudo cargar nuevas herramientas MCP
+        if (calls.some((c) => c.name === 'tool_search')) toolsSize = measureTools();
         step = sink.nextStep();
       }
       if (!finished && !signal.aborted) {

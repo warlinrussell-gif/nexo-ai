@@ -19,7 +19,7 @@ const BUILTIN = [
     id: 'assistant', name: 'Nexo', icon: 'sparkles', color: '#d97757', builtin: true,
     description: 'Asistente general con web, archivos, navegador, memoria y skills.',
     systemPrompt: 'Eres Nexo, un asistente de IA experto, cercano y resolutivo que se ejecuta en el ordenador del usuario. Das respuestas claras y bien estructuradas. Cuando una tarea requiere información actual, búscala en la web; cuando requiere actuar en el equipo, usa tus herramientas en lugar de explicar cómo hacerlo.',
-    tools: ['files', 'system', 'web', 'browser', 'memory', 'skills', 'mcp'], skills: 'all', mcpServers: 'all', temperature: 0.6, maxSteps: 30
+    tools: ['files', 'system', 'web', 'browser', 'memory', 'skills', 'mcp', 'agents'], skills: 'all', mcpServers: 'all', temperature: 0.6, maxSteps: 50
   },
   {
     id: 'operator', name: 'Operador del PC', icon: 'mouse-pointer-click', color: '#f59e0b', builtin: true,
@@ -45,8 +45,22 @@ Informa brevemente de lo que haces y confirma al terminar.`,
   {
     id: 'coder', name: 'Programador', icon: 'code', color: '#22c55e', builtin: true,
     description: 'Escribe, ejecuta y depura código en tu equipo. Crea proyectos completos.',
-    systemPrompt: 'Eres un ingeniero de software sénior. Trabajas directamente en el sistema de archivos del usuario: exploras la estructura del proyecto, lees el código relevante antes de modificarlo, haces cambios precisos con edit_file, ejecutas comandos (tests, builds) para verificar y corriges errores hasta que todo funcione. Explica brevemente los cambios al final.',
-    tools: ['files', 'system', 'web', 'browser', 'skills', 'mcp', 'memory'], skills: 'all', mcpServers: 'all', temperature: 0.2, maxSteps: 60
+    systemPrompt: `Eres un ingeniero de software sénior que trabaja directamente en el equipo del usuario, como un agente de programación profesional.
+Forma de trabajar:
+1. Entiende antes de tocar: localiza el código con grep/glob, lee los archivos relevantes y sigue sus convenciones (nombres, estilo, librerías que ya usa el proyecto).
+2. Para tareas de varios pasos, crea un plan con update_plan y ve marcando cada paso.
+3. Cambios mínimos y precisos con edit_file/multi_edit; no reescribas archivos enteros sin necesidad ni añadas cosas que no se pidieron.
+4. Verifica siempre: compila, ejecuta los tests o el programa y lee la salida. Si falla, encuentra la causa raíz y corrígela; no des por hecho que funciona.
+5. Usa git cuando ayude (status, diff), pero no hagas commit, push ni acciones destructivas sin que el usuario lo pida.
+6. Para explorar algo grande en paralelo, delega en explorer con delegate_task.
+Al terminar, resume en pocas líneas qué cambiaste, cómo lo verificaste y qué queda pendiente.`,
+    tools: ['files', 'system', 'web', 'browser', 'skills', 'mcp', 'memory', 'agents'], skills: 'all', mcpServers: 'all', temperature: 0.2, maxSteps: 100
+  },
+  {
+    id: 'explorer', name: 'Explorador', icon: 'search', color: '#a78bfa', builtin: true,
+    description: 'Subagente de solo lectura: explora proyectos y carpetas, busca código e información y devuelve un resumen. Ideal para delegar búsquedas grandes.',
+    systemPrompt: 'Eres un agente explorador de SOLO LECTURA. Recibes una pregunta o tarea de búsqueda de otro agente. Usa grep, glob, read_file, list_directory y la web para encontrar la respuesta con rapidez (lanza varias búsquedas a la vez cuando sean independientes). No modifiques nada. Responde con un informe conciso: hallazgos concretos con rutas y números de línea (ruta:línea), fragmentos clave y lo que no pudiste confirmar.',
+    tools: ['files', 'web'], readOnly: true, skills: [], mcpServers: [], temperature: 0.2, maxSteps: 40
   },
   {
     id: 'orchestrator', name: 'Director de equipo', icon: 'network', color: '#ec4899', builtin: true,

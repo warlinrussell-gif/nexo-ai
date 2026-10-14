@@ -27,7 +27,7 @@ export default function Icon({ name, size = 16, className, style, strokeWidth = 
 }
 
 export const TOOL_ICONS = {
-  read_file: 'file', write_file: 'save', edit_file: 'pencil', list_directory: 'folder-open', search_files: 'search', move_path: 'arrow-right', delete_path: 'trash',
+  read_file: 'file', write_file: 'save', edit_file: 'pencil', list_directory: 'folder-open', search_files: 'search', grep: 'search', glob: 'folder-open', multi_edit: 'pencil', tool_search: 'plug', move_path: 'arrow-right', delete_path: 'trash',
   run_command: 'terminal', open_app: 'rocket', system_info: 'cpu', list_processes: 'activity', kill_process: 'circle-stop', clipboard_read: 'clipboard', clipboard_write: 'clipboard', notify: 'bell',
   computer: 'mouse-pointer-click', web_search: 'search', fetch_url: 'globe', browser: 'globe', memory_save: 'brain', memory_forget: 'brain', use_skill: 'skills',
   update_plan: 'list-checks', delegate_task: 'network'

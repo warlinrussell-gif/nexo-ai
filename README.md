@@ -6,7 +6,7 @@
 
 **Tu estudio de IA de escritorio: modelos locales y en la nube, agentes que usan tu PC, MCP, skills, navegador y voz — todo en una sola app.**
 
-![Version](https://img.shields.io/badge/versión-1.3.4-d97757)
+![Version](https://img.shields.io/badge/versión-1.4.0-d97757)
 ![Platform](https://img.shields.io/badge/plataforma-Windows%20%7C%20Linux%20%7C%20macOS-blue)
 ![Electron](https://img.shields.io/badge/Electron-React%20%2B%20Vite-47848F?logo=electron)
 ![llama.cpp](https://img.shields.io/badge/motor-llama.cpp-black)
@@ -38,11 +38,11 @@ Analiza tu hardware y te dice qué modelos van **fluidos**, cuáles **lentos** y
 | 🔀 **Multi-modelo** | Varios modelos cargados a la vez con reparto de VRAM/RAM. Modos **Comparar** y **Etapas**, y un agente *Director de equipo* que reparte subtareas. |
 | ☁️ **APIs** | OpenAI, Anthropic, Google Gemini, OpenRouter, Groq, DeepSeek, Mistral, xAI, Together, Fireworks, Cerebras, Ollama, LM Studio y cualquier servidor compatible con OpenAI. Claves cifradas con el almacén seguro del sistema. |
 | 🤖 **Agentes** | Nexo, Operador del PC, Investigador, Programador, Director de equipo y JARVIS, o los tuyos con prompt, modelo, herramientas, skills y MCP propios. Integración con **OpenCode** para modelos en la nube. |
-| 🛠️ **Agente de código** | Carpeta de proyecto por chat, lee `AGENTS.md` / `NEXO.md` / `CLAUDE.md`, **checkpoints con botón de rebobinar**, compactación automática del contexto, preguntas al usuario a mitad de tarea y *hooks*. |
+| 🛠️ **Agente de código** | Búsqueda rápida con `grep` y `glob`, ediciones múltiples atómicas (`multi_edit`) con protección si el archivo cambió, subagente **Explorador** de solo lectura, carpeta de proyecto por chat, lee `AGENTS.md` / `NEXO.md` / `CLAUDE.md`, **checkpoints con botón de rebobinar**, compactación automática del contexto, preguntas al usuario a mitad de tarea y *hooks*. |
 | 🖱️ **Control del PC** | Archivos, PowerShell, apps, procesos, portapapeles y **control de ratón, teclado y pantalla** para modelos con visión. Píldora con botón **Detener** (`Ctrl+Alt+Q`). |
 | 🔐 **Permisos** | *Preguntar*, *Inteligente* (recomendado) o *Acceso total*, también por chat. |
 | 🌐 **Web** | Búsqueda sin claves (o Brave/Tavily/SearXNG) y **navegador integrado** que el agente controla mientras lo ves. |
-| 🔌 **MCP** | Servidores stdio, HTTP y SSE; galería con un clic; importación desde Claude Desktop o JSON. |
+| 🔌 **MCP** | Servidores stdio, HTTP y SSE; **carga bajo demanda** (`tool_search`) para usar cientos de herramientas sin llenar el contexto; galería con un clic; importación desde Claude Desktop o JSON. |
 | 📚 **Skills** | Formato `SKILL.md` (compatible con Agent Skills). Incluye skills en español. |
 | 🎙️ **Voz** | Dictado, conversación por voz y **modo JARVIS** ("Jarvis, …" incluso minimizado). whisper.cpp local o por API; voces Piper, del sistema, OpenAI o ElevenLabs. |
 | 🎨 **Interfaz** | Estilo moderno tipo Claude, tema claro/oscuro, paleta de comandos, selector de modelo y de **nivel de pensamiento**, historial con búsqueda, adjuntos, estadísticas de tok/s, memoria persistente y exportación a Markdown. |
