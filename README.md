@@ -97,7 +97,7 @@ Jarvis, ¿qué tengo en la carpeta de Descargas?
 Necesitas **Node.js 20+** y Git.
 
 ```bash
-git clone https://github.com/<tu-usuario>/nexo-ai.git
+git clone https://github.com/warlinrussell-gif/nexo-ai.git
 cd nexo-ai
 npm install
 npm run dev          # compila la interfaz y abre la app
