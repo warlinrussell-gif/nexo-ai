@@ -260,6 +260,7 @@ const embedded = new BrowserController();
 let engine = 'embedded';
 let chrome = null;
 export function setBrowserEngine(e) { engine = e === 'chrome' ? 'chrome' : 'embedded'; if (engine === 'embedded' && chrome) { chrome.close(); chrome = null; } }
+export async function closeBrowserEngine() { if (chrome) { await chrome.close(); chrome = null; } }
 const ROUTED = new Set(['navigate', 'read', 'find', 'hover', 'fill', 'select', 'wait', 'consoleLog', 'click', 'type', 'press', 'scroll', 'back', 'forward', 'screenshot', 'evaluate']);
 
 export const browser = new Proxy(embedded, {

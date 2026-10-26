@@ -20,7 +20,7 @@ import * as agents from './agents.js';
 import * as chats from './chats.js';
 import { Engine } from './engine.js';
 import * as opencode from './opencode.js';
-import { browser, setBrowserEngine } from './browser.js';
+import { browser, setBrowserEngine, closeBrowserEngine } from './browser.js';
 import * as voice from './voice.js';
 import { shutdownInput } from './computer.js';
 import { planModel, planMulti, staticBudget, recommendContext } from '../shared/fit.js';
@@ -546,7 +546,7 @@ app.on('will-quit', async (e) => {
   app._nexoCleaned = true;
   try { flushAll(); chats.flushChats(); } catch { }
   shutdownInput();
-  await Promise.race([Promise.allSettled([llama.stopAll(), voice.stopWhisper(), mcp.disconnectAll()]), new Promise((r) => setTimeout(r, 4000))]);
+  await Promise.race([Promise.allSettled([llama.stopAll(), voice.stopWhisper(), mcp.disconnectAll(), closeBrowserEngine()]), new Promise((r) => setTimeout(r, 4000))]);
   app.quit();
 });
 app.on('window-all-closed', () => { if (!isMac && !tray) app.quit(); });
