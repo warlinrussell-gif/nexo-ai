@@ -3,6 +3,7 @@
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
+import { EXT_ID } from './ext-id.js';
 
 export const BRIDGE_PORT = 47615;
 const eq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); };
@@ -15,16 +16,19 @@ class ExtBridge extends EventEmitter {
   start(code) {
     this.code = code;
     if (this.wss) return;
-    this.wss = new WebSocketServer({ host: '127.0.0.1', port: BRIDGE_PORT, verifyClient: ({ origin }) => !origin || origin.startsWith('chrome-extension://') });
+    this.wss = new WebSocketServer({ host: '127.0.0.1', port: BRIDGE_PORT, verifyClient: ({ origin }) => !origin || origin === `chrome-extension://${EXT_ID}` });
     this.wss.on('error', (e) => this.emit('error', e));
-    this.wss.on('connection', (ws) => {
+    this.wss.on('connection', (ws, req) => {
       let role = null;
+      const fromExt = req.headers.origin === `chrome-extension://${EXT_ID}`; // Chrome fija el origen: ninguna web puede suplantarlo
       const timer = setTimeout(() => { if (!role) ws.close(); }, 5000);
       ws.on('message', async (raw) => {
         let m; try { m = JSON.parse(String(raw)); } catch { return; }
         if (!role) {
-          if (m.type !== 'hello' || !eq(m.code, this.code)) { ws.close(); return; }
-          role = m.role === 'ext' ? 'ext' : 'ctl'; clearTimeout(timer);
+          // la extensión se identifica por su ID fijo (sin códigos); los procesos propios de Nexo (MCP) llevan un código interno
+          const asExt = m.role === 'ext';
+          if (m.type !== 'hello' || (asExt ? !fromExt : (fromExt || !eq(m.code, this.code)))) { ws.close(); return; }
+          role = asExt ? 'ext' : 'ctl'; clearTimeout(timer);
           if (role === 'ext') { try { this.ext?.close(); } catch { /* */ } this.ext = ws; this.emit('state', true); }
           ws.send(JSON.stringify({ type: 'ready' }));
           return;

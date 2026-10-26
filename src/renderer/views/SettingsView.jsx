@@ -21,13 +21,11 @@ function ExtSetup() {
       <ol style={{ margin: '8px 0 8px 18px', padding: 0 }}>
         <li>Abre <b>chrome://extensions</b> y activa <b>Modo de desarrollador</b>.</li>
         <li>Pulsa <b>Cargar descomprimida</b> y elige la carpeta de la extensión de Nexo.</li>
-        <li>Haz clic en el icono de Nexo en Chrome y pega este código: <code style={{ userSelect: 'all', fontWeight: 700 }}>{info.code}</code></li>
+        <li>Listo: Nexo se conecta solo, sin códigos.</li>
       </ol>
       <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
         <Button size="sm" onClick={() => call('ext.openFolder')}>Abrir carpeta de la extensión</Button>
         <Button size="sm" onClick={() => call('ext.openChromeExtensions')}>Abrir chrome://extensions</Button>
-        <Button size="sm" onClick={() => navigator.clipboard.writeText(info.code)}>Copiar código</Button>
-        <Button size="sm" onClick={async () => { await call('ext.newCode'); refresh(); }}>Generar código nuevo</Button>
       </div>
     </div>
   );

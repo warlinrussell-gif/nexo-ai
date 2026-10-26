@@ -19,14 +19,10 @@ async function go(dir) {
   return state();
 }
 
-async function code() { return (await chrome.storage.local.get('code')).code || ''; }
-
 async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  const c = await code();
-  if (!c) return;
   try { ws = new WebSocket(`ws://127.0.0.1:${PORT}`); } catch { return; }
-  ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', role: 'ext', code: c }));
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', role: 'ext' }));
   ws.onmessage = async (ev) => {
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     if (!m.id || !m.op) return;

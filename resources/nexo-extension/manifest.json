@@ -3,9 +3,24 @@
   "name": "Nexo AI",
   "version": "1.0.0",
   "description": "Permite que Nexo AI use tu Chrome (con tus sesiones) para navegar, leer y hacer clic cuando tú se lo pides.",
-  "permissions": ["tabs", "scripting", "storage", "alarms"],
-  "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "background.js" },
-  "action": { "default_title": "Nexo AI", "default_popup": "popup.html" },
-  "icons": { "128": "icon.png" }
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Nexo AI",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "128": "icon.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAk0k0jejQAzkPzORxdbEmxLTwlRYn8VOP2w1005AIJDPTrMzZlNruxfQ943085VPWlqGWxSB7DftgVQHFyXjJVcLus6uSlgKr1DR6VACVCf8KvAkcJnmOG6mVyxHhbtgmxSHMS8oWkOuEh0ZQnq8gg4pdqxk17v+LXxCXwsB8lumYiGfhtW6Q/6fBO9a+w+B+KgMTxfdboxkW5SaS2Gq8wtTH6+ytn2fTkuuOmAPWC4nSNYSjFdC4QuGWPw2c3VHHJqQDvkWsDKclK8Aexpac1y1bz0x8zVNuJ9hBALp9T/ukrgiy4mAgFrgnD22fHQqXA0kiBkUoagAib/K++irycwIDAQAB"
 }

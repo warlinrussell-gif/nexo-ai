@@ -7,14 +7,13 @@ import { extBridge, connectBridge } from '../src/main/ext-bridge.js';
 import { ExtBrowser } from '../src/main/browser-ext.js';
 import { findChrome } from '../src/main/browser-chrome.js';
 
-const CODE = 'test-code-123';
+const CODE = 'codigo-interno-test';
 const ext = path.resolve('resources/nexo-extension');
 extBridge.start(CODE);
 const prof = fs.mkdtempSync(path.join(os.tmpdir(), 'nexo-ext-'));
 const b = await puppeteer.launch({ executablePath: findChrome(), headless: false, userDataDir: prof, enableExtensions: [ext], pipe: true, args: ['--no-first-run', '--no-default-browser-check'] });
 const sw = await b.waitForTarget((t) => t.type() === 'service_worker' && t.url().includes('background.js'), { timeout: 15000 });
 const worker = await sw.worker();
-await worker.evaluate((c) => chrome.storage.local.set({ code: c }), CODE);
 await worker.evaluate(() => connect());
 for (let i = 0; i < 30 && !extBridge.connected(); i++) await new Promise((r) => setTimeout(r, 500));
 console.log('conectada:', extBridge.connected());
