@@ -235,21 +235,37 @@ class BrowserController extends EventEmitter {
 
 const embedded = new BrowserController();
 
-// Motor activo: 'embedded' (panel lateral) o 'chrome' (Chrome real vía browser-chrome.js).
+// Motor activo: 'embedded' (panel lateral), 'chrome' (Chrome propio por puppeteer) o 'extension' (tu Chrome vía la extensión de Nexo).
 let engine = 'embedded';
-let chrome = null;
-export function setBrowserEngine(e) { engine = e === 'chrome' ? 'chrome' : 'embedded'; if (engine === 'embedded' && chrome) { chrome.close(); chrome = null; } }
-export async function closeBrowserEngine() { if (chrome) { await chrome.close(); chrome = null; } }
+let remote = null;
+export function setBrowserEngine(e) {
+  const next = e === 'chrome' || e === 'extension' ? e : 'embedded';
+  if (next !== engine && remote) { remote.close(); remote = null; }
+  engine = next;
+}
+export async function closeBrowserEngine() { if (remote) { await remote.close(); remote = null; } }
+async function getRemote() {
+  if (remote) return remote;
+  if (engine === 'chrome') {
+    const { ChromeBrowser } = await import('./browser-chrome.js');
+    remote = new ChromeBrowser({ profileDir: (await import('./paths.js')).dir('cache', 'chrome-profile') });
+  } else {
+    const { ExtBrowser } = await import('./browser-ext.js');
+    const { extBridge } = await import('./ext-bridge.js');
+    const { findChrome } = await import('./browser-chrome.js');
+    const { spawn } = await import('node:child_process');
+    remote = new ExtBrowser({
+      call: (op, a) => extBridge.call(op, a), connected: () => extBridge.connected(),
+      launch: () => { const exe = findChrome(); if (exe) spawn(exe, ['about:blank'], { detached: true, stdio: 'ignore' }).unref(); }
+    });
+  }
+  return remote;
+}
 const ROUTED = new Set(['navigate', 'read', 'find', 'hover', 'fill', 'select', 'wait', 'consoleLog', 'click', 'type', 'press', 'scroll', 'back', 'forward', 'screenshot', 'evaluate']);
 
 export const browser = new Proxy(embedded, {
   get(target, prop) {
-    if (engine === 'chrome' && ROUTED.has(prop)) {
-      return async (...args) => {
-        if (!chrome) { const { ChromeBrowser } = await import('./browser-chrome.js'); chrome = new ChromeBrowser({ profileDir: (await import('./paths.js')).dir('cache', 'chrome-profile') }); }
-        return chrome[prop](...args);
-      };
-    }
+    if (engine !== 'embedded' && ROUTED.has(prop)) return async (...args) => (await getRemote())[prop](...args);
     const v = target[prop];
     return typeof v === 'function' ? v.bind(target) : v;
   },

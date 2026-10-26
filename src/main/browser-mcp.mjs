@@ -6,7 +6,14 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { ChromeBrowser } from './browser-chrome.js';
 import { BROWSER_DESCRIPTION, BROWSER_PROPERTIES, runBrowserAction } from './browser-tool.js';
 
-const chrome = new ChromeBrowser();
+let chrome;
+if (process.env.NEXO_BROWSER_ENGINE === 'extension') {
+  // Tu Chrome vía la extensión: el MCP habla con Nexo (puente local) y Nexo con la extensión.
+  const { ExtBrowser } = await import('./browser-ext.js');
+  const { connectBridge } = await import('./ext-bridge.js');
+  const bridge = await connectBridge(process.env.NEXO_BRIDGE_CODE);
+  chrome = new ExtBrowser({ call: bridge.call });
+} else chrome = new ChromeBrowser();
 const server = new Server({ name: 'nexo-browser', version: '1.0.0' }, { capabilities: { tools: {} } });
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({

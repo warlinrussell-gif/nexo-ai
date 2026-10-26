@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Nexo AI",
+  "version": "1.0.0",
+  "description": "Permite que Nexo AI use tu Chrome (con tus sesiones) para navegar, leer y hacer clic cuando tú se lo pides.",
+  "permissions": ["tabs", "scripting", "storage", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Nexo AI", "default_popup": "popup.html" },
+  "icons": { "128": "icon.png" }
+}

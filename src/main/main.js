@@ -3,6 +3,7 @@ import { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, globalShortcut,
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { inspect } from 'node:util';
 
@@ -21,6 +22,8 @@ import * as chats from './chats.js';
 import { Engine } from './engine.js';
 import * as opencode from './opencode.js';
 import { browser, setBrowserEngine, closeBrowserEngine } from './browser.js';
+import { extBridge, BRIDGE_PORT } from './ext-bridge.js';
+import crypto from 'node:crypto';
 import * as voice from './voice.js';
 import { shutdownInput } from './computer.js';
 import { planModel, planMulti, staticBudget, recommendContext } from '../shared/fit.js';
@@ -51,6 +54,20 @@ function fixPath() {
   process.env[key] = parts.join(path.delimiter);
 }
 protocol.registerSchemesAsPrivileged([{ scheme: 'nexo', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } }]);
+
+// ───────────────── Extensión de Chrome de Nexo ("Mi Chrome") ─────────────────
+function extCode() {
+  const s = getSettings();
+  if (!s.browser?.extCode) { s.browser = { ...s.browser, extCode: crypto.randomBytes(9).toString('base64url') }; save('settings', s, true); }
+  return s.browser.extCode;
+}
+function extFolder() { return paths.dir('extension'); }
+function startExtBridge() {
+  try { fs.cpSync(path.join(paths.resourcesDir(), 'nexo-extension'), extFolder(), { recursive: true }); } catch (e) { console.error('extensión:', e.message); }
+  extBridge.on('error', (e) => console.error('puente de la extensión:', e.message));
+  extBridge.on('state', (c) => send('ext-state', { connected: c }));
+  extBridge.start(extCode());
+}
 
 // Solo http(s) y mailto desde la interfaz: nunca file:, ms-*:, etc.
 const openSafe = (u) => (/^(https?:|mailto:)/i.test(String(u)) ? shell.openExternal(String(u)) : undefined);
@@ -233,6 +250,10 @@ const api = {
   'app.storage': () => ({ models: dirSize(paths.dir('models')), runtimes: dirSize(paths.dir('runtimes')), voice: dirSize(paths.dir('voice')), chats: dirSize(paths.dir('chats')) + dirSize(paths.dir('attachments')), disk: paths.diskFree(paths.getDataDir()) }),
   'app.openPath': (p) => shell.openPath(p),
   'app.openExternal': (u) => openSafe(u),
+  'ext.info': () => ({ code: extCode(), folder: extFolder(), connected: extBridge.connected(), port: BRIDGE_PORT }),
+  'ext.openFolder': () => { shell.openPath(extFolder()); return true; },
+  'ext.openChromeExtensions': () => { const exe = ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find((p) => fs.existsSync(p)); if (exe) spawn(exe, ['chrome://extensions'], { detached: true, stdio: "ignore" }).unref(); return !!exe; },
+  'ext.newCode': () => { const s = getSettings(); s.browser = { ...s.browser, extCode: crypto.randomBytes(9).toString('base64url') }; save('settings', s, true); extBridge.setCode(s.browser.extCode); return s.browser.extCode; },
   'app.showItem': (p) => shell.showItemInFolder(p),
   'app.pickFiles': async (opts = {}) => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile', ...(opts.multi === false ? [] : ['multiSelections'])], filters: opts.filters });
@@ -452,6 +473,7 @@ function createWindow() {
   });
   browser.attach(win);
   setBrowserEngine(getSettings().browser?.engine);
+  startExtBridge();
   win.loadFile(RENDERER);
   win.once('ready-to-show', () => { if (!process.argv.includes('--hidden')) win.show(); });
   win.on('close', (e) => {

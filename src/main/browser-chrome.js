@@ -13,6 +13,8 @@ const CANDIDATES = [
   process.env['PROGRAMFILES(X86)'] && path.join(process.env['PROGRAMFILES(X86)'], 'Microsoft/Edge/Application/msedge.exe'),
 ].filter(Boolean);
 
+export function findChrome() { return CANDIDATES.find((p) => fs.existsSync(p)); }
+
 export class ChromeBrowser {
   /** profileDir: carpeta del perfil de Chrome (persistente). */
   constructor({ profileDir } = {}) { this.profileDir = profileDir || process.env.NEXO_CHROME_PROFILE; this.b = null; this.page = null; this.logs = []; }

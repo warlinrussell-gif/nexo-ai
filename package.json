@@ -1,7 +1,7 @@
 {
   "name": "nexo-ai",
   "productName": "Nexo AI",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "Nexo AI - Estudio de IA local y en la nube con agentes, MCP, skills, control del PC, navegador y voz.",
   "author": "Nexo AI",
   "license": "MIT",
@@ -23,7 +23,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",
     "puppeteer-core": "^25.16.0",
-    "tar": "^7.5.22"
+    "tar": "^7.5.22",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",

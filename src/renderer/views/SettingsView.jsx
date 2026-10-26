@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useStore } from '../lib/store.js';
-import { call, fmtBytes } from '../lib/api.js';
+import { call, on, fmtBytes } from '../lib/api.js';
 import Icon from '../components/Icon.jsx';
 import { Button, Toggle, Seg, Setting, Field, IconButton, Modal, Confirm } from '../components/ui.jsx';
 import ModelPicker from '../components/ModelPicker.jsx';
@@ -8,6 +8,30 @@ import { DownloadRow } from './ModelsView.jsx';
 import { getSpeaker } from '../components/Voice.jsx';
 
 const ACCENTS = ['#d97757', '#c96442', '#8b5cf6', '#6366f1', '#3b82f6', '#06b6d4', '#14b8a6', '#22c55e', '#f59e0b', '#ef4444', '#ec4899'];
+
+// Emparejado de la extensión de Chrome de Nexo ("Mi Chrome")
+function ExtSetup() {
+  const [info, setInfo] = useState(null);
+  const refresh = () => call('ext.info').then(setInfo);
+  useEffect(() => { refresh(); return on('ext-state', refresh); }, []);
+  if (!info) return null;
+  return (
+    <div className="setting-block" style={{ padding: '10px 14px', margin: '6px 0 12px', border: '1px solid var(--border)', borderRadius: 10, fontSize: 13, lineHeight: 1.55 }}>
+      <div><b>{info.connected ? '✔ Extensión conectada a tu Chrome' : '○ Extensión sin conectar'}</b></div>
+      <ol style={{ margin: '8px 0 8px 18px', padding: 0 }}>
+        <li>Abre <b>chrome://extensions</b> y activa <b>Modo de desarrollador</b>.</li>
+        <li>Pulsa <b>Cargar descomprimida</b> y elige la carpeta de la extensión de Nexo.</li>
+        <li>Haz clic en el icono de Nexo en Chrome y pega este código: <code style={{ userSelect: 'all', fontWeight: 700 }}>{info.code}</code></li>
+      </ol>
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <Button size="sm" onClick={() => call('ext.openFolder')}>Abrir carpeta de la extensión</Button>
+        <Button size="sm" onClick={() => call('ext.openChromeExtensions')}>Abrir chrome://extensions</Button>
+        <Button size="sm" onClick={() => navigator.clipboard.writeText(info.code)}>Copiar código</Button>
+        <Button size="sm" onClick={async () => { await call('ext.newCode'); refresh(); }}>Generar código nuevo</Button>
+      </div>
+    </div>
+  );
+}
 
 function General() {
   const { settings, saveSettings, agents } = useStore();
@@ -137,7 +161,8 @@ function Permissions() {
       <Setting title="Captura tras cada acción" desc="El modelo verifica el resultado de cada clic o pulsación"><Toggle value={s.computer?.screenshotAfterAction !== false} onChange={(v) => saveSettings({ computer: { screenshotAfterAction: v } })} /></Setting>
       <Setting title="Resolución de las capturas" desc="Menor = más rápido y barato; mayor = más preciso"><select className="select" style={{ width: 150 }} value={s.computer?.maxScreenshotWidth || 1366} onChange={(e) => saveSettings({ computer: { maxScreenshotWidth: Number(e.target.value) } })}>{[1024, 1280, 1366, 1600, 1920].map((v) => <option key={v} value={v}>{v}px</option>)}</select></Setting>
       <Setting title="Directorio de trabajo de los agentes" desc={s.workspace}><Button size="sm" onClick={async () => { const d = await call('app.chooseFolder', 'Directorio de trabajo', s.workspace); if (d) saveSettings({ workspace: d }); }}>Cambiar…</Button></Setting>
-      <Setting title="Navegador de los agentes" desc="«Chrome real» abre tu Chrome con un perfil propio de Nexo (conserva tus inicios de sesión) y lo controla para navegar y hacer clic"><select className="select" style={{ width: 150 }} value={s.browser?.engine || 'embedded'} onChange={(e) => saveSettings({ browser: { engine: e.target.value } })}><option value="embedded">Integrado</option><option value="chrome">Chrome real</option></select></Setting>
+      <Setting title="Navegador de los agentes" desc="«Chrome real» abre un Chrome con perfil propio de Nexo; «Mi Chrome» usa tu navegador de siempre (con tus sesiones) mediante la extensión de Nexo"><select className="select" style={{ width: 150 }} value={s.browser?.engine || 'embedded'} onChange={(e) => saveSettings({ browser: { engine: e.target.value } })}><option value="embedded">Integrado</option><option value="chrome">Chrome real</option><option value="extension">Mi Chrome (extensión)</option></select></Setting>
+      {s.browser?.engine === 'extension' && <ExtSetup />}
       <Setting title="Abrir el navegador integrado cuando lo use un agente"><Toggle value={s.browser?.autoOpen !== false} onChange={(v) => saveSettings({ browser: { autoOpen: v } })} /></Setting>
     </>
   );
