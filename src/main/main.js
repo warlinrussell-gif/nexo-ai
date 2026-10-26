@@ -20,7 +20,7 @@ import * as agents from './agents.js';
 import * as chats from './chats.js';
 import { Engine } from './engine.js';
 import * as opencode from './opencode.js';
-import { browser } from './browser.js';
+import { browser, setBrowserEngine } from './browser.js';
 import * as voice from './voice.js';
 import { shutdownInput } from './computer.js';
 import { planModel, planMulti, staticBudget, recommendContext } from '../shared/fit.js';
@@ -52,6 +52,9 @@ function fixPath() {
 }
 protocol.registerSchemesAsPrivileged([{ scheme: 'nexo', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } }]);
 
+// Solo http(s) y mailto desde la interfaz: nunca file:, ms-*:, etc.
+const openSafe = (u) => (/^(https?:|mailto:)/i.test(String(u)) ? shell.openExternal(String(u)) : undefined);
+
 if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
 
 let win = null, overlay = null, tray = null, quitting = false, initialized = false, engine = null;
@@ -66,7 +69,7 @@ const DEFAULT_SETTINGS = {
   voice: { stt: 'whisper-local', whisperModel: 'small-q5_1', language: 'es', tts: 'system', systemVoice: '', piperVoice: 'es_ES-davefx-medium', openaiVoice: 'alloy', elevenVoice: '', rate: 1, autoSpeak: false, wakeWord: 'jarvis', jarvisAgent: 'jarvis', jarvisModel: '', hotkey: 'CommandOrControl+Shift+Space', vadThreshold: 0.5, silenceMs: 900 },
   web: { searchEngine: 'auto', searxngUrl: '' },
   computer: { hideWindow: true, maxScreenshotWidth: 1366, screenshotAfterAction: true },
-  browser: { autoOpen: true },
+  browser: { autoOpen: true, engine: 'embedded' },
   closeToTray: true, launchAtLogin: false, setupDone: false,
   secrets: { hfToken: '', brave: '', tavily: '', elevenlabs: '' }
 };
@@ -229,7 +232,7 @@ const api = {
   'app.disk': (p) => paths.diskFree(p || paths.getDataDir() || os.homedir()),
   'app.storage': () => ({ models: dirSize(paths.dir('models')), runtimes: dirSize(paths.dir('runtimes')), voice: dirSize(paths.dir('voice')), chats: dirSize(paths.dir('chats')) + dirSize(paths.dir('attachments')), disk: paths.diskFree(paths.getDataDir()) }),
   'app.openPath': (p) => shell.openPath(p),
-  'app.openExternal': (u) => shell.openExternal(u),
+  'app.openExternal': (u) => openSafe(u),
   'app.showItem': (p) => shell.showItemInFolder(p),
   'app.pickFiles': async (opts = {}) => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile', ...(opts.multi === false ? [] : ['multiSelections'])], filters: opts.filters });
@@ -249,6 +252,7 @@ const api = {
     for (const [k, v] of Object.entries(rest)) s[k] = v && typeof v === 'object' && !Array.isArray(v) && s[k] && typeof s[k] === 'object' ? { ...s[k], ...v } : v;
     save('settings', s, true);
     if (patch.voice?.hotkey !== undefined) registerHotkey();
+    if (patch.browser?.engine !== undefined) setBrowserEngine(s.browser.engine);
     if (patch.launchAtLogin !== undefined) app.setLoginItemSettings({ openAtLogin: !!patch.launchAtLogin, args: ['--hidden'], name: 'Nexo AI' });
     return api['settings.get']();
   },
@@ -443,9 +447,10 @@ function createWindow() {
     title: 'Nexo AI', icon: fs.existsSync(ICON) ? ICON : undefined,
     titleBarStyle: 'hidden',
     ...(isMac ? { trafficLightPosition: { x: 16, y: 15 } } : { titleBarOverlay: overlayColors() }),
-    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, spellcheck: true }
+    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false, spellcheck: true }
   });
   browser.attach(win);
+  setBrowserEngine(getSettings().browser?.engine);
   win.loadFile(RENDERER);
   win.once('ready-to-show', () => { if (!process.argv.includes('--hidden')) win.show(); });
   win.on('close', (e) => {
@@ -453,8 +458,8 @@ function createWindow() {
   });
   win.webContents.on('console-message', (e) => { if (e.level === 'error') console.error('[interfaz]', e.message, e.sourceId ? `(${e.sourceId}:${e.lineNumber})` : ''); });
   win.webContents.on('render-process-gone', (_e, d) => console.error('[interfaz] proceso de renderizado terminado:', d));
-  win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
-  win.webContents.on('will-navigate', (e, url) => { if (!url.startsWith('file:')) { e.preventDefault(); shell.openExternal(url); } });
+  win.webContents.setWindowOpenHandler(({ url }) => { openSafe(url); return { action: 'deny' }; });
+  win.webContents.on('will-navigate', (e, url) => { if (!url.startsWith('file:')) { e.preventDefault(); openSafe(url); } });
 }
 function getSafeCloseToTray() { try { return paths.isConfigured() && getSettings().closeToTray && !!tray; } catch { return false; } }
 

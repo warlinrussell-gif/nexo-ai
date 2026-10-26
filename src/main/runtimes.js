@@ -2,12 +2,11 @@
 // Se descargan automáticamente la versión y el backend adecuados al hardware.
 import fs from 'node:fs';
 import path from 'node:path';
-import extractZip from 'extract-zip';
 import * as tar from 'tar';
 import { dir } from './paths.js';
 import { load, save } from './store.js';
 import { downloads } from './downloads.js';
-import { isWin, isMac, findFile, rmrf } from './util.js';
+import { isWin, isMac, findFile, rmrf, run } from './util.js';
 
 const GH = 'https://api.github.com/repos';
 const EXE = isWin ? '.exe' : '';
@@ -62,7 +61,11 @@ async function findRelease(repo, patterns) {
 
 export async function extractArchive(file, dest) {
   fs.mkdirSync(dest, { recursive: true });
-  if (/\.zip$/i.test(file)) await extractZip(file, { dir: path.resolve(dest) });
+  if (/\.zip$/i.test(file)) {
+    // extractor del sistema (bsdtar en Windows 10+, unzip en Linux/macOS): evita extract-zip, con CVE sin parche
+    const r = isWin ? await run(path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe'), ['-xf', file, '-C', path.resolve(dest)], { timeout: 600000 }) : await run('unzip', ['-o', '-q', file, '-d', path.resolve(dest)], { timeout: 600000 });
+    if (!r.ok) throw new Error('No se pudo descomprimir ' + path.basename(file) + ': ' + (r.stderr || r.error?.message || '').slice(0, 200));
+  }
   else await tar.x({ file, cwd: dest });
   if (!isWin) {
     // asegurar permisos de ejecución

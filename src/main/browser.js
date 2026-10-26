@@ -5,7 +5,7 @@ import { truncate, sleep } from './util.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
 
-const READ_SCRIPT = `(() => {
+export const READ_SCRIPT = `(() => {
   document.querySelectorAll('[data-nexo-id]').forEach(e => e.removeAttribute('data-nexo-id'));
   const sel = 'a[href], button, input:not([type=hidden]), textarea, select, [role=button], [role=link], [role=tab], [role=menuitem], [role=checkbox], [role=option], [role=combobox], [role=searchbox], [contenteditable=""], [contenteditable=true], summary, [onclick], [tabindex]:not([tabindex="-1"])';
   const els = [...document.querySelectorAll(sel)];
@@ -254,4 +254,23 @@ class BrowserController extends EventEmitter {
   }
 }
 
-export const browser = new BrowserController();
+const embedded = new BrowserController();
+
+// Motor activo: 'embedded' (panel lateral) o 'chrome' (Chrome real vía browser-chrome.js).
+let engine = 'embedded';
+let chrome = null;
+export function setBrowserEngine(e) { engine = e === 'chrome' ? 'chrome' : 'embedded'; if (engine === 'embedded' && chrome) { chrome.close(); chrome = null; } }
+const ROUTED = new Set(['navigate', 'read', 'find', 'hover', 'fill', 'select', 'wait', 'consoleLog', 'click', 'type', 'press', 'scroll', 'back', 'forward', 'screenshot', 'evaluate']);
+
+export const browser = new Proxy(embedded, {
+  get(target, prop) {
+    if (engine === 'chrome' && ROUTED.has(prop)) {
+      return async (...args) => {
+        if (!chrome) { const { ChromeBrowser } = await import('./browser-chrome.js'); chrome = new ChromeBrowser(); }
+        return chrome[prop](...args);
+      };
+    }
+    const v = target[prop];
+    return typeof v === 'function' ? v.bind(target) : v;
+  },
+});
