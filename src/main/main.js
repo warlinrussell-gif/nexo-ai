@@ -347,6 +347,7 @@ const api = {
     return !r.canceled;
   },
   'chats.send': (id, payload) => { engine.send(id, payload).catch((e) => send('toast', { type: 'error', text: e.message })); return true; },
+  'chats.steer': (id, payload) => { Promise.resolve(engine.steer(id, payload)).catch((e) => send('toast', { type: 'error', text: e.message })); return true; },
   'chats.stop': (id) => engine.stop(id),
   'chats.running': () => [...(engine?.runs.keys() || [])],
   'chats.regenerate': (id, index) => { engine.send(id, { regenerateFrom: index }).catch((e) => send('toast', { type: 'error', text: e.message })); return true; },

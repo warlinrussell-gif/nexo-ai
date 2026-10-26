@@ -10,6 +10,7 @@ import { dir } from './paths.js';
 import * as computer from './computer.js';
 import { webSearch, fetchUrl } from './web.js';
 import { browser } from './browser.js';
+import { BROWSER_DESCRIPTION, BROWSER_PROPERTIES, runBrowserAction } from './browser-tool.js';
 import { addMemory, deleteMemory, listMemory } from './agents.js';
 import { getSkill, listSkills } from './skills.js';
 import { mcp } from './mcp.js';
@@ -480,32 +481,7 @@ export function builtinTools(ctx) {
   });
 
   // ─── Navegador ───
-  add('browser', 'browser', 'browser', 'Controla el navegador de Nexo (visible para el usuario, con sesión persistente; según Ajustes es el panel integrado o una ventana de Chrome real). Acciones: navigate (url o búsqueda), read (texto de la página + elementos interactivos numerados [n]; offset para seguir leyendo páginas largas), find (text: localiza texto y elementos que lo contienen), click (index), hover (index), type (index, text, submit), fill (fields: [{index, value}] rellena varios campos de un formulario de una vez; checkboxes con value "true"/"false"), select (index, value: elige una opción de un desplegable), press (key: Enter/Tab/Escape/ArrowDown...), scroll (direction, amount), wait (seconds, o text para esperar a que aparezca), back, forward, screenshot (ver la página), console (mensajes y errores de la consola JS), evaluate (script JS). Tras navigate/click usa read para ver el resultado.', {
-    action: { type: 'string', enum: ['navigate', 'read', 'find', 'click', 'hover', 'type', 'fill', 'select', 'press', 'scroll', 'wait', 'back', 'forward', 'screenshot', 'console', 'evaluate'] },
-    url: { type: 'string' }, index: { type: 'integer' }, text: { type: 'string' }, submit: { type: 'boolean' }, key: { type: 'string' }, direction: { type: 'string', enum: ['up', 'down'] }, amount: { type: 'number' }, script: { type: 'string' },
-    value: { type: 'string' }, fields: { type: 'array', items: { type: 'object', properties: { index: { type: 'integer' }, value: { type: 'string' } }, required: ['index', 'value'] } }, offset: { type: 'integer', description: 'Carácter desde el que seguir leyendo (read)' }, seconds: { type: 'number' }
-  }, ['action'], async (a) => {
-    const summary = (s) => `Página: ${s.title || '(sin título)'}\nURL: ${s.url}`;
-    switch (a.action) {
-      case 'navigate': { const s = await browser.navigate(a.url || a.text); const r = await browser.read({ maxChars: 6000 }); return `${summary(s)}\n\n## Contenido\n${r.text}\n\n## Elementos interactivos\n${r.elements}`; }
-      case 'read': { const r = await browser.read({ maxChars: 14000, offset: a.offset || 0 }); return `Página: ${r.title}\nURL: ${r.url}\nScroll: ${r.scrollY}/${r.scrollHeight}px${r.more ? `\nTexto mostrado: caracteres ${r.from}-${r.to} de ${r.total} (continúa con offset=${r.to})` : ''}\n\n## Contenido\n${r.text}\n\n## Elementos interactivos\n${r.elements}`; }
-      case 'find': return await browser.find(a.text || a.value || '');
-      case 'hover': { await browser.hover(a.index); return `Ratón sobre [${a.index}]`; }
-      case 'fill': return await browser.fill(a.fields || []);
-      case 'select': return await browser.select(a.index, a.value ?? a.text ?? '');
-      case 'wait': return await browser.wait({ seconds: a.seconds, text: a.text });
-      case 'console': return browser.consoleLog();
-      case 'click': { const s = await browser.click(a.index); const r = await browser.read({ maxChars: 5000 }); return `Clic en [${a.index}]. ${summary(s)}\n\n## Contenido\n${r.text}\n\n## Elementos interactivos\n${r.elements}`; }
-      case 'type': { const s = await browser.type(a.index, a.text || '', a.submit); if (a.submit) { const r = await browser.read({ maxChars: 5000 }); return `Escrito y enviado. ${summary(s)}\n\n## Contenido\n${r.text}\n\n## Elementos interactivos\n${r.elements}`; } return `Texto escrito en [${a.index}]`; }
-      case 'press': { const s = await browser.press(a.key || 'Enter'); return `Tecla ${a.key || 'Enter'} pulsada. ${summary(s)}`; }
-      case 'scroll': { await browser.scroll(a.direction || 'down', a.amount || 1); const r = await browser.read({ maxChars: 6000 }); return `Desplazado. Scroll ${r.scrollY}/${r.scrollHeight}\n\n${r.text}\n\n## Elementos\n${r.elements}`; }
-      case 'back': return summary(await browser.back());
-      case 'forward': return summary(await browser.forward());
-      case 'screenshot': { const img = await browser.screenshot(); return { text: 'Captura del navegador', images: [img] }; }
-      case 'evaluate': return truncate(await browser.evaluate(a.script || ''), 20000);
-      default: throw new Error('Acción desconocida');
-    }
-  });
+  add('browser', 'browser', 'browser', BROWSER_DESCRIPTION, BROWSER_PROPERTIES, ['action'], (a) => runBrowserAction(browser, a));
 
   // ─── Memoria ───
   add('memory', 'read', 'memory_save', 'Guarda un dato duradero sobre el usuario (preferencias, nombre, proyectos, etc.) para recordarlo en futuros chats. No guardes datos temporales ni secretos.', { fact: { type: 'string' } }, ['fact'], async (a) => { addMemory(a.fact); return 'Recordado: ' + a.fact; });

@@ -92,7 +92,7 @@ export default function Composer({ chat, running, onSend, onStop, onVoice, place
   }
 
   function submit() {
-    if (running || disabled) return;
+    if (disabled) return;
     const t = text.trim();
     if (!t && !atts.length) return;
     onSend({ text: t, attachments: atts });
@@ -178,9 +178,8 @@ export default function Composer({ chat, running, onSend, onStop, onVoice, place
           {singleModel && !isOpenCode && <ModelPicker value={modelRef} onChange={setModel} allowDefault flat />}
           <IconButton icon="mic" title="Dictar (voz a texto)" onClick={startDictation} disabled={!!rec || transcribing} />
           <IconButton icon="audio-lines" title="Conversación por voz" onClick={onVoice} />
-          {running
-            ? <button className="send stop" onClick={onStop} title="Detener (Esc)"><Icon name="stop" size={13} /></button>
-            : <button className="send" onClick={submit} disabled={disabled || (!text.trim() && !atts.length)} title="Enviar (Enter)"><Icon name="arrow-up" size={17} strokeWidth={2.4} /></button>}
+          {running && <button className="send stop" onClick={onStop} title="Detener (Esc)"><Icon name="stop" size={13} /></button>}
+          {(!running || text.trim()) && <button className="send" onClick={submit} disabled={disabled || (!text.trim() && !atts.length)} title="Enviar (Enter)"><Icon name="arrow-up" size={17} strokeWidth={2.4} /></button>}
         </div>
       </div>
       {!hero && <div className="composer-foot">Nexo puede cometer errores. Revisa las acciones importantes. {perm === 'full' && <span style={{ color: 'var(--amber)' }}>Acceso total activado.</span>}</div>}

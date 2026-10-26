@@ -39,12 +39,15 @@ const engine = new Engine({ getSettings, getHardware: async () => hw, requestApp
 const chat = chats.createChat({ agentId: 'assistant', model: `local:${local.id}` });
 chats.updateChat(chat.id, { toolsOverride: ['browser'], reasoningEffort: 'none' });
 const t0 = Date.now();
+const steerText = process.env.STEER;
+if (steerText) setTimeout(() => engine.steer(chat.id, { text: steerText }), Number(process.env.STEER_MS || 2500));
 const msg = await engine.send(chat.id, { text: 'Con la herramienta browser abre https://example.com, haz clic en el enlace "Learn more" (o el único enlace de la página) y dime el título de la página a la que llegaste.' });
 const tools = (msg.blocks || []).filter((b) => b.type === 'tool');
 const text = (msg.blocks || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
 console.log(`estado=${msg.status} ${msg.error || ''} · ${((Date.now() - t0) / 1000).toFixed(1)} s`);
 console.log('herramientas:', tools.map((t) => `${t.name}(${t.args?.action || ''}:${t.status})`).join(' → '));
 console.log('respuesta:', text.slice(0, 400).replace(/\n/g, ' '));
+console.log('bloques usuario:', (msg.blocks || []).filter((b) => b.type === 'user').map((b) => b.text).join(' | '));
 console.log(/example domains/i.test(text) && tools.some((t) => t.args?.action === 'click') ? 'OK ✔' : 'FALLO ✘');
 setBrowserEngine('embedded');
 await llama.stopAll();

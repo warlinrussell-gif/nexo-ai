@@ -207,6 +207,7 @@ export default function ChatView() {
     }
     userScrollingRef.current = false;
     setAtBottom(true);
+    if (useStore.getState().running.has(c.id)) { await call('chats.steer', c.id, payload); return; }
     await sendMessage(c.id, payload);
   }
 

@@ -406,6 +406,25 @@ export class Engine extends EventEmitter {
 
   isRunning(chatId) { return this.runs.has(chatId); }
 
+  /** Instrucción nueva con el agente trabajando: los agentes de Nexo la leen en el siguiente paso; OpenCode se interrumpe y continúa con ella. */
+  steer(chatId, { text, attachments = [] } = {}) {
+    const run = this.runs.get(chatId);
+    const t = String(text || '').trim();
+    if (!run) return this.send(chatId, { text, attachments });
+    if (!t) return null;
+    run.steer.push(t);
+    run.sink?.userNote(t);
+    if (run.opencode) { run.redirect = true; run.inner?.abort(); }
+    return null;
+  }
+
+  /** Mensajes del usuario recibidos durante la ejecución (solo el agente principal). */
+  drainSteer(chatId) {
+    const run = this.runs.get(chatId);
+    if (!run?.steer.length) return [];
+    return run.steer.splice(0);
+  }
+
   stop(chatId) {
     const r = this.runs.get(chatId);
     if (r) r.controller.abort();
@@ -446,6 +465,8 @@ export class Engine extends EventEmitter {
     try {
       for (let iter = 0; iter < maxSteps; iter++) {
         if (signal.aborted) break;
+        if (depth === 0) for (const t of this.drainSteer(chatId)) convo.push({ role: 'user', content: `[Mensaje nuevo del usuario mientras trabajabas — tenlo en cuenta y ajusta lo que estás haciendo]
+${t}` });
         await this.compactIfNeeded({ convo, resolved, toolsSize, signal, sink, chat: depth === 0 ? chat : null });
         sink.status('thinking');
         let trimmed = this.trimToContext(convo, resolved.ctx || 8192, toolsSize).map(stripPrivate);
@@ -496,6 +517,7 @@ export class Engine extends EventEmitter {
           }
         }
         finalText = text || finalText;
+        if (!calls.length && !signal.aborted && depth === 0 && this.runs.get(chatId)?.steer.length) { convo.push({ role: 'assistant', content: text }); continue; }
         if (!calls.length || signal.aborted) { finished = true; break; }
         convo.push({ role: 'assistant', content: text, tool_calls: calls.map((c) => ({ id: c.id, name: c.name, arguments: c.arguments })), thinking_blocks: thinkingBlocks, reasoning_content: reasoning || undefined });
         sink.status('tools');
@@ -663,6 +685,7 @@ export class Engine extends EventEmitter {
       raw: (b) => { blocks.push(b); },
       plan: (items) => { const p = blocks.find((b) => b.type === 'plan'); if (p) p.items = items; else blocks.push({ type: 'plan', items }); onChange(); },
       notice: (text) => { blocks.push({ type: 'notice', text }); onChange(); },
+      userNote: (text) => { blocks.push({ type: 'user', text }); onChange(); },
       stage: (label, extra) => { blocks.push({ type: 'stage', label, ...extra }); onChange(); },
       update: () => onChange(),
       status: (s) => { onStatus?.(s); onChange(); },
@@ -695,7 +718,7 @@ export class Engine extends EventEmitter {
     saveChat(chat);
     this.emit('chat-meta', { chatId, title: chat.title });
     const controller = new AbortController();
-    this.runs.set(chatId, { controller, message });
+    this.runs.set(chatId, { controller, message, steer: [], opencode: agent.runner === 'opencode' });
     this.emitMessage(chatId, message, true);
     const t0 = Date.now();
     try {
@@ -728,6 +751,7 @@ export class Engine extends EventEmitter {
       onUsage: (u, t) => { message.usage = accumulateUsage(message.usage, u, t); },
       onStatus: (s) => { message.status = s; }
     });
+    const run = this.runs.get(chat.id); if (run) run.sink = sink;
     await this.agentLoop({ chatId: chat.id, agent, ref, messages: history, sink, signal: controller.signal, chat });
   }
 
@@ -746,7 +770,21 @@ export class Engine extends EventEmitter {
       else if (a.kind === 'text') prompt += `\n\n--- ${a.name} ---\n${truncate(a.text || '', 60000)}`;
       else if (a.path) files.push(a.path);
     }
-    await this.openCodeTurn({ chat, prompt, files, sink, signal: controller.signal, useSession: true });
+    const run = this.runs.get(chat.id); if (run) run.sink = sink;
+    const original = prompt;
+    for (;;) {
+      const inner = new AbortController();
+      const link = () => inner.abort();
+      controller.signal.addEventListener('abort', link, { once: true });
+      if (run) { run.inner = inner; run.redirect = false; }
+      try { await this.openCodeTurn({ chat, prompt, files, sink, signal: inner.signal, useSession: true }); }
+      catch (e) { if (!(run?.redirect && !controller.signal.aborted)) throw e; }
+      finally { controller.signal.removeEventListener('abort', link); }
+      if (controller.signal.aborted || !run?.redirect) break;
+      const extra = run.steer.splice(0);
+      prompt = ['Tarea original: ' + original, 'Mientras trabajabas, el usuario te da una instrucción nueva:', extra.join('\n'), 'Continúa desde donde ibas y cumple también lo nuevo (si cambia el objetivo, adáptate). Si el navegador aparece vacío, vuelve a abrir la página en la que estabas.'].join('\n\n');
+      files.length = 0;
+    }
   }
 
   /**

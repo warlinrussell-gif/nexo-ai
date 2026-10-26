@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { isWin, run } from './util.js';
+import * as paths from './paths.js';
 
 let cachedBin = null;
 let modelsCache = { t: 0, list: [] };
@@ -95,6 +97,11 @@ const SCHEMA_RE = /schema.*(nesting|depth)|nesting depth/i;
 /** Configuración en línea: modelo local de Nexo y MCP extra activados o no. */
 function buildConfig(local, mcpOn) {
   const c = { mcp: Object.fromEntries(EXTRA_MCP.map((n) => [n, { enabled: !!mcpOn }])) };
+  // Navegador de Nexo (Chrome real) como herramienta MCP: OpenCode puede navegar y hacer clic sin pasar por la terminal.
+  try {
+    const script = fileURLToPath(new URL('./browser-mcp.mjs', import.meta.url));
+    c.mcp['nexo-browser'] = { type: 'local', command: [process.execPath, script], enabled: true, timeout: 60000, environment: { ELECTRON_RUN_AS_NODE: '1', NEXO_CHROME_PROFILE: paths.dir('cache', 'chrome-profile') } };
+  } catch { /* sin carpeta de datos configurada */ }
   const p = nexoProviderConfig(local);
   if (p) Object.assign(c, p);
   return JSON.stringify(c);

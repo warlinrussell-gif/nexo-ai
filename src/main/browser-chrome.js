@@ -3,8 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { sleep } from './util.js';
-import * as paths from './paths.js';
-import { READ_SCRIPT } from './browser.js';
+import { READ_SCRIPT } from './browser-read-script.js';
 
 const CANDIDATES = [
   process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES, 'Google/Chrome/Application/chrome.exe'),
@@ -15,7 +14,8 @@ const CANDIDATES = [
 ].filter(Boolean);
 
 export class ChromeBrowser {
-  constructor() { this.b = null; this.page = null; this.logs = []; }
+  /** profileDir: carpeta del perfil de Chrome (persistente). */
+  constructor({ profileDir } = {}) { this.profileDir = profileDir || process.env.NEXO_CHROME_PROFILE; this.b = null; this.page = null; this.logs = []; }
 
   async ensure() {
     if (this.page && !this.page.isClosed() && this.b?.connected) return this.page;
@@ -24,7 +24,7 @@ export class ChromeBrowser {
     if (!exe) throw new Error('No encontré Chrome ni Edge instalados. Instala Chrome o cambia el motor a "Integrado" en Ajustes.');
     this.b = await puppeteer.launch({
       executablePath: exe, headless: false, defaultViewport: null,
-      userDataDir: paths.dir('cache', 'chrome-profile'),
+      userDataDir: this.profileDir,
       args: ['--no-first-run', '--no-default-browser-check', '--window-size=1280,860'],
       ignoreDefaultArgs: ['--enable-automation'],
     });

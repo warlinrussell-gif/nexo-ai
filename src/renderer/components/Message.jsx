@@ -152,6 +152,7 @@ export function Blocks({ blocks = [], streaming, nested }) {
         if (b.type === 'reasoning') return showReasoning && b.text?.trim() ? <Reasoning key={i} block={b} active={streaming && i === lastIdx} /> : null;
         if (b.type === 'tool') return <ToolBlock key={b.id || i} block={b} />;
         if (b.type === 'plan') return <PlanBlock key={i} block={b} />;
+        if (b.type === 'user') return <div key={i} className="user-note"><span>Tú, durante la tarea</span>{b.text}</div>;
         if (b.type === 'notice') return <div key={i} className="notice">{b.text}</div>;
         if (b.type === 'stage') return <div key={i} className="stage-head"><span className="num">{b.index + 1}</span><strong style={{ color: 'var(--text)' }}>{b.label}</strong><span>· {b.agentName} · {b.modelName}</span></div>;
         return null;

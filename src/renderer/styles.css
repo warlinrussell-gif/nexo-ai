@@ -657,3 +657,6 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius
 .composer-bar > .picker-btn { max-width: 300px; min-width: 0; }
 /* buscador fijo arriba en los menús largos (selector de modelos de OpenCode) */
 .popover .popover-search { position: sticky; top: -6px; margin: -6px -6px 0; padding-top: 14px !important; z-index: 1; background: var(--surface); border-radius: 12px 12px 0 0; }
+
+.user-note { font-size: 13.5px; padding: 8px 12px; margin: 8px 0; border-radius: 10px; background: var(--accent-soft, rgba(217,119,87,.12)); border: 1px solid var(--accent, #d97757); }
+.user-note span { display: block; font-size: 11px; opacity: .7; margin-bottom: 2px; }
