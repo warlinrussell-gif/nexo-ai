@@ -7,18 +7,21 @@
   host.style.cssText = 'all:initial;position:fixed;inset:0;z-index:2147483647;pointer-events:none;display:none';
   const root = host.attachShadow({ mode: 'closed' });
   root.innerHTML = `<style>
-    .glow{position:fixed;inset:0;pointer-events:none;box-shadow:inset 0 0 0 3px rgba(217,119,87,.95),inset 0 0 38px 10px rgba(217,119,87,.45);animation:p 1.8s ease-in-out infinite;opacity:0;transition:opacity .35s}
+    .glow{position:fixed;inset:0;pointer-events:none;box-shadow:inset 0 0 0 3px rgba(122,75,224,.95),inset 0 0 38px 10px rgba(122,75,224,.45);animation:p 1.8s ease-in-out infinite;opacity:0;transition:opacity .35s}
     .on .glow{opacity:1}
-    @keyframes p{0%,100%{box-shadow:inset 0 0 0 3px rgba(217,119,87,.95),inset 0 0 30px 8px rgba(217,119,87,.35)}50%{box-shadow:inset 0 0 0 3px rgba(255,160,120,1),inset 0 0 55px 16px rgba(217,119,87,.6)}}
-    .chip{position:fixed;top:10px;left:50%;transform:translateX(-50%);font:600 12px system-ui,sans-serif;color:#fff;background:#d97757;padding:4px 12px;border-radius:999px;box-shadow:0 2px 10px rgba(0,0,0,.35);opacity:0;transition:opacity .35s}
-    .on .chip{opacity:1}
+    @keyframes p{0%,100%{box-shadow:inset 0 0 0 3px rgba(122,75,224,.95),inset 0 0 30px 8px rgba(122,75,224,.35)}50%{box-shadow:inset 0 0 0 3px rgba(168,130,255,1),inset 0 0 55px 16px rgba(122,75,224,.6)}}
+    .chip{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:10px;font:600 13px system-ui,sans-serif;color:#fff;background:rgba(28,24,44,.94);border:1px solid rgba(168,130,255,.6);padding:7px 8px 7px 14px;border-radius:999px;box-shadow:0 6px 24px rgba(0,0,0,.45),0 0 18px rgba(122,75,224,.5);opacity:0;transition:opacity .35s;pointer-events:none}
+    .on .chip{opacity:1;pointer-events:auto}
+    .dot{width:8px;height:8px;border-radius:50%;background:#a882ff;animation:b 1.2s ease-in-out infinite}@keyframes b{50%{opacity:.25}}
+    .stop{all:unset;cursor:pointer;font:600 12px system-ui,sans-serif;background:#7a4be0;color:#fff;padding:5px 12px;border-radius:999px}.stop:hover{background:#8f66ee}
     .ptr{position:fixed;left:0;top:0;width:26px;height:26px;transition:transform .45s cubic-bezier(.3,.7,.2,1),opacity .3s;opacity:0;filter:drop-shadow(0 2px 3px rgba(0,0,0,.45))}
     .on .ptr{opacity:1}
-    .ripple{position:fixed;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;border:2px solid #d97757;animation:r .6s ease-out forwards}
+    .ripple{position:fixed;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;border:2px solid #7a4be0;animation:r .6s ease-out forwards}
     @keyframes r{to{transform:scale(4);opacity:0}}
-  </style><div id="w"><div class="glow"></div><div class="chip">Nexo está trabajando en esta página</div>
-  <svg class="ptr" viewBox="0 0 24 24"><path d="M3 2l7.5 19 2.7-7.8L21 10.5z" fill="#d97757" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg></div>`;
+  </style><div id="w"><div class="glow"></div><div class="chip"><span class="dot"></span>Nexo está trabajando en esta página<button class="stop" id="stop">Detener</button></div>
+  <svg class="ptr" viewBox="0 0 24 24"><path d="M3 2l7.5 19 2.7-7.8L21 10.5z" fill="#7a4be0" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg></div>`;
   const w = root.getElementById('w'), ptr = root.querySelector('.ptr');
+  root.getElementById('stop').addEventListener('click', () => { try { chrome.runtime.sendMessage({ type: 'stop' }); } catch { /* */ } w.classList.remove('on'); });
   let off = null, px = innerWidth / 2, py = innerHeight / 2;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   window.__nexoUi = {
@@ -27,7 +30,7 @@
       host.style.display = 'block';
       requestAnimationFrame(() => w.classList.add('on'));
       clearTimeout(off);
-      off = setTimeout(() => this.hide(), 6000);
+      off = setTimeout(() => this.hide(), 8000);
     },
     hide() { w.classList.remove('on'); setTimeout(() => { if (!w.classList.contains('on')) host.style.display = 'none'; }, 400); },
     async moveTo(x, y) {

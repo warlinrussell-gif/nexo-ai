@@ -37,6 +37,7 @@ chrome.alarms.onAlarm.addListener(() => connect());
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 chrome.runtime.onMessage.addListener((m, _s, reply) => {
+  if (m.type === 'stop') { try { ws?.send(JSON.stringify({ type: 'stop' })); } catch { /* */ } }
   if (m.type === 'status') reply({ connected: !!ws && ws.readyState === WebSocket.OPEN });
   if (m.type === 'reconnect') { try { ws?.close(); } catch { /* */ } ws = null; connect().then(() => reply(true)); return true; }
 });
@@ -50,7 +51,7 @@ async function groupTab(tabId) {
   try {
     if (groupId != null) { try { await chrome.tabGroups.get(groupId); } catch { groupId = null; } }
     groupId = await chrome.tabs.group(groupId != null ? { tabIds: tabId, groupId } : { tabIds: tabId });
-    await chrome.tabGroups.update(groupId, { title: 'Nexo AI', color: 'orange', collapsed: false });
+    await chrome.tabGroups.update(groupId, { title: 'Nexo AI', color: 'purple', collapsed: false });
   } catch { /* tabGroups no disponible */ }
 }
 chrome.tabs.onCreated.addListener((t) => { if (nexoTab != null && t.openerTabId === nexoTab) groupTab(t.id); });

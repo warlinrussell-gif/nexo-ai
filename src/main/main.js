@@ -66,6 +66,7 @@ function startExtBridge() {
   try { fs.cpSync(path.join(paths.resourcesDir(), 'nexo-extension'), extFolder(), { recursive: true }); } catch (e) { console.error('extensión:', e.message); }
   extBridge.on('error', (e) => console.error('puente de la extensión:', e.message));
   extBridge.on('state', (c) => send('ext-state', { connected: c }));
+  extBridge.on('stop', () => { for (const id of engine?.runs.keys() || []) engine.stop(id); }); // botón "Detener" de la página
   extBridge.start(extCode());
 }
 
@@ -79,7 +80,7 @@ const pendingApprovals = new Map();
 const pendingQuestions = new Map();
 
 const DEFAULT_SETTINGS = {
-  theme: 'dark', accent: '#d97757', fontScale: 1, sendOnEnter: true, showReasoning: true, compact: false,
+  theme: 'dark', accent: '#7a4be0', palette: 'nexo', background: 'none', fontScale: 1, sendOnEnter: true, showReasoning: true, compact: false,
   defaultModel: null, defaultAgent: 'assistant', customInstructions: '', workspace: '',
   permissions: { mode: 'smart' }, toolsEnabled: true, reasoningEffort: 'auto',
   ctx: 8192, autoCtx: true, autoCompact: true, hooks: [], opencode: { path: '', model: '', autoApprove: false }, kvType: 'f16', threads: 0, parallel: 1, autoUnloadMinutes: 30, reserveVramMB: 700, autoSwap: true, backendOverride: '',
@@ -125,6 +126,7 @@ async function initCore() {
   if (!s.workspace) { s.workspace = paths.dir('workspace'); save('settings', s); }
   // Interfaz 1.2: el morado anterior era el acento por defecto; si nunca se cambió, pasa al nuevo tono cálido
   if ((s.uiVersion || 1) < 2) { if (!s.accent || s.accent === '#8b5cf6') s.accent = '#d97757'; s.uiVersion = 2; save('settings', s, true); }
+  if ((s.uiVersion || 1) < 3) { if (!s.accent || s.accent === '#d97757') s.accent = '#7a4be0'; s.palette = s.palette || 'nexo'; s.background = s.background || 'none'; s.uiVersion = 3; save('settings', s, true); }
   downloads.init();
   downloads.headersFor = (url) => (/huggingface\.co/.test(url) && secret('hfToken') ? { Authorization: `Bearer ${secret('hfToken')}` } : {});
   downloads.on('update', (j) => send('downloads', j));
@@ -465,7 +467,7 @@ function createWindow() {
   nativeTheme.themeSource = theme === 'light' ? 'light' : theme === 'system' ? 'system' : 'dark';
   win = new BrowserWindow({
     width: 1440, height: 920, minWidth: 980, minHeight: 640, show: false,
-    backgroundColor: theme === 'light' ? '#faf9f5' : '#262624',
+    backgroundColor: theme === 'light' ? '#faf9f5' : '#14121c',
     title: 'Nexo AI', icon: fs.existsSync(ICON) ? ICON : undefined,
     titleBarStyle: 'hidden',
     ...(isMac ? { trafficLightPosition: { x: 16, y: 15 } } : { titleBarOverlay: overlayColors() }),

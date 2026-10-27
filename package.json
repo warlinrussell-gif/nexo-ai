@@ -1,7 +1,7 @@
 {
   "name": "nexo-ai",
   "productName": "Nexo AI",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Nexo AI - Estudio de IA local y en la nube con agentes, MCP, skills, control del PC, navegador y voz.",
   "author": "Nexo AI",
   "license": "MIT",

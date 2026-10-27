@@ -34,6 +34,7 @@ class ExtBridge extends EventEmitter {
           return;
         }
         if (role === 'ext') {
+          if (m.type === 'stop') { this.emit('stop'); return; }
           const p = this.pending.get(m.id);
           if (p) { this.pending.delete(m.id); clearTimeout(p.t); m.ok ? p.resolve(m.result) : p.reject(new Error(m.error || 'error de la extensión')); }
         } else if (m.id && m.op) {

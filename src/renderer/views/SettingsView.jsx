@@ -7,7 +7,9 @@ import ModelPicker from '../components/ModelPicker.jsx';
 import { DownloadRow } from './ModelsView.jsx';
 import { getSpeaker } from '../components/Voice.jsx';
 
-const ACCENTS = ['#d97757', '#c96442', '#8b5cf6', '#6366f1', '#3b82f6', '#06b6d4', '#14b8a6', '#22c55e', '#f59e0b', '#ef4444', '#ec4899'];
+const PALETTES = [{ id: 'nexo', label: 'Nexo', c: '#1c1927' }, { id: 'medianoche', label: 'Medianoche', c: '#131a28' }, { id: 'grafito', label: 'Grafito', c: '#1d1d1d' }, { id: 'bosque', label: 'Bosque', c: '#14201c' }, { id: 'carmesi', label: 'Carmesí', c: '#221424' }, { id: 'clasico', label: 'Clásica', c: '#30302e' }];
+const BACKGROUNDS = [{ id: 'none', label: 'Ninguno' }, { id: 'aurora', label: 'Aurora' }, { id: 'fluid', label: 'Degradado fluido' }, { id: 'stars', label: 'Estrellas' }, { id: 'constellation', label: 'Constelación' }, { id: 'waves', label: 'Olas' }];
+const ACCENTS = ['#7a4be0', '#d97757', '#c96442', '#8b5cf6', '#6366f1', '#3b82f6', '#06b6d4', '#14b8a6', '#22c55e', '#f59e0b', '#ef4444', '#ec4899'];
 
 // Emparejado de la extensión de Chrome de Nexo ("Mi Chrome")
 function ExtSetup() {
@@ -39,7 +41,9 @@ function General() {
     <>
       <h2>General</h2>
       <Setting title="Tema" desc="Apariencia de la aplicación"><Seg value={s.theme} onChange={setTheme} options={[{ value: 'dark', label: 'Oscuro', icon: 'moon' }, { value: 'light', label: 'Claro', icon: 'sun' }, { value: 'system', label: 'Sistema', icon: 'monitor' }]} /></Setting>
-      <Setting title="Color de acento"><div className="row" style={{ gap: 6 }}>{ACCENTS.map((c) => <span key={c} className={`color-swatch ${s.accent === c ? 'on' : ''}`} style={{ background: c }} onClick={() => saveSettings({ accent: c })} />)}</div></Setting>
+      <Setting title="Color de acento"><div className="row" style={{ gap: 6 }}>{ACCENTS.map((c) => <span key={c} className={`color-swatch ${s.accent === c ? 'on' : ''}`} style={{ background: c }} onClick={() => saveSettings({ accent: c })} />)}<label className="color-swatch" title="Color personalizado" style={{ background: 'conic-gradient(red, yellow, lime, aqua, blue, magenta, red)', position: 'relative', overflow: 'hidden' }}><input type="color" value={s.accent || '#7a4be0'} onChange={(e) => saveSettings({ accent: e.target.value })} style={{ opacity: 0, position: 'absolute', inset: 0, width: '100%', height: '100%', cursor: 'pointer' }} /></label></div></Setting>
+      <Setting title="Paleta" desc="Colores de las superficies en modo oscuro (el de acento se elige aparte)"><div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>{PALETTES.map((p) => <button key={p.id} className={`btn ${((s.palette || 'nexo') === p.id) ? 'primary' : ''}`} onClick={() => saveSettings({ palette: p.id })} style={{ gap: 8 }}><span style={{ width: 14, height: 14, borderRadius: 5, background: p.c, border: '1px solid rgba(255,255,255,.3)' }} />{p.label}</button>)}</div></Setting>
+      <Setting title="Fondo animado" desc="Movimiento suave detrás de la aplicación. Se pausa con la ventana oculta; «Ninguno» no consume nada"><div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>{BACKGROUNDS.map((b) => <button key={b.id} className={`btn ${((s.background || 'none') === b.id) ? 'primary' : ''}`} onClick={() => saveSettings({ background: b.id })}>{b.label}</button>)}</div></Setting>
       <Setting title={`Tamaño de texto: ${Math.round((s.fontScale || 1) * 100)}%`}><input type="range" className="slider" style={{ width: 200 }} min={0.85} max={1.3} step={0.05} value={s.fontScale || 1} onChange={(e) => saveSettings({ fontScale: Number(e.target.value) })} /></Setting>
       <Setting title="Enviar con Enter" desc="Si lo desactivas, envía con Ctrl+Enter"><Toggle value={s.sendOnEnter !== false} onChange={(v) => saveSettings({ sendOnEnter: v })} /></Setting>
       <Setting title="Mostrar razonamiento" desc="Muestra el proceso de pensamiento de los modelos que razonan"><Toggle value={s.showReasoning !== false} onChange={(v) => saveSettings({ showReasoning: v })} /></Setting>

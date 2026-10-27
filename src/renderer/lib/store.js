@@ -133,7 +133,9 @@ export function applyTheme(settings) {
   let theme = settings.theme || 'dark';
   if (theme === 'system') theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
   root.dataset.theme = theme;
-  root.style.setProperty('--accent', settings.accent || '#d97757');
+  root.dataset.palette = settings.palette || 'nexo';
+  root.dataset.bg = settings.background || 'none';
+  root.style.setProperty('--accent', settings.accent || '#7a4be0');
   root.style.setProperty('--fs', `${Math.round(14 * (settings.fontScale || 1) * 10) / 10}px`);
 }
 

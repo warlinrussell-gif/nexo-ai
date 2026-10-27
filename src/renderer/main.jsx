@@ -2,6 +2,7 @@ import { createRoot } from 'react-dom/client';
 import './styles.css';
 import App from './App.jsx';
 import Overlay from './views/Overlay.jsx';
+import BackgroundFX from './components/BackgroundFX.jsx';
 import { useStore, wireEvents } from './lib/store.js';
 
 const isOverlay = location.hash === '#overlay';
@@ -14,5 +15,5 @@ if (isOverlay) {
   wireEvents();
   window.__nexoStore = useStore;
   useStore.getState().boot().catch((e) => console.error(e));
-  root.render(<App />);
+  root.render(<><BackgroundFX /><App /></>);
 }

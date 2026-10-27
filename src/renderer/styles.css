@@ -1,24 +1,23 @@
 /* ───────────── Nexo AI · sistema de diseño ───────────── */
 :root {
-  --accent: #d97757;
+  --accent: #7a4be0;
   --accent-2: color-mix(in oklab, var(--accent) 78%, #fff);
   --accent-soft: color-mix(in oklab, var(--accent) 16%, transparent);
   --accent-softer: color-mix(in oklab, var(--accent) 9%, transparent);
-  --bg: #262624;
-  --bg-2: #262624;
-  --sidebar: #1f1e1d;
-  --surface: #30302e;
-  --surface-2: #383835;
-  --surface-3: #42413d;
-  --user-bubble: #141413;
-  --hover: rgba(250, 249, 245, 0.06);
-  --active: rgba(250, 249, 245, 0.09);
-  --border: rgba(222, 220, 209, 0.12);
-  --border-strong: rgba(222, 220, 209, 0.2);
-  --text: #faf9f5;
-  --text-2: #cac7bd;
-  --muted: #9b9890;
-  --faint: #6e6c66;
+  --c-bg: #14121c; --c-sidebar: #100e17;
+  --bg: var(--c-bg); --bg-2: var(--c-bg); --sidebar: var(--c-sidebar);
+  --surface: #1c1927;
+  --surface-2: #25213a;
+  --surface-3: #2f2a47;
+  --user-bubble: #0d0b14;
+  --hover: rgba(214, 205, 255, 0.07);
+  --active: rgba(214, 205, 255, 0.11);
+  --border: rgba(200, 190, 255, 0.12);
+  --border-strong: rgba(200, 190, 255, 0.22);
+  --text: #f5f3fc;
+  --text-2: #cbc7de;
+  --muted: #9c97b3;
+  --faint: #6b6784;
   --green: #4ead6b; --teal: #3fa79a; --amber: #e0a043; --orange: #e07b43; --red: #e05d4f; --blue: #5b8def; --cyan: #3aa6c0; --pink: #d9649b;
   --shadow: 0 10px 40px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.25);
   --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.2);
@@ -34,12 +33,12 @@
   color-scheme: dark;
 }
 :root[data-theme="light"] {
-  --bg: #faf9f5; --bg-2: #faf9f5; --sidebar: #f3f1ea; --surface: #ffffff; --surface-2: #f5f4ee; --surface-3: #ebe9e0;
-  --user-bubble: #f0eee6;
+  --c-bg: #faf9fd; --c-sidebar: #f2f0f9; --surface: #ffffff; --surface-2: #f4f2fa; --surface-3: #e9e6f3;
+  --user-bubble: #efecf8;
   --accent-2: color-mix(in oklab, var(--accent) 82%, #000);
-  --hover: rgba(31, 30, 29, 0.05); --active: rgba(31, 30, 29, 0.08);
-  --border: rgba(31, 30, 29, 0.11); --border-strong: rgba(31, 30, 29, 0.2);
-  --text: #141413; --text-2: #3d3d3a; --muted: #73726c; --faint: #a3a29b;
+  --hover: rgba(40, 30, 90, 0.05); --active: rgba(40, 30, 90, 0.09);
+  --border: rgba(40, 30, 90, 0.12); --border-strong: rgba(40, 30, 90, 0.22);
+  --text: #15121f; --text-2: #3b3750; --muted: #716d86; --faint: #a39fb7;
   --shadow: 0 10px 40px rgba(40, 30, 20, 0.1), 0 2px 8px rgba(40, 30, 20, 0.05);
   --shadow-sm: 0 2px 10px rgba(40, 30, 20, 0.05);
   color-scheme: light;
@@ -47,7 +46,7 @@
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
-body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: var(--fs); line-height: 1.5; -webkit-font-smoothing: antialiased; overflow: hidden; user-select: none; }
+body { background: var(--c-bg); color: var(--text); font-family: var(--font); font-size: var(--fs); line-height: 1.5; -webkit-font-smoothing: antialiased; overflow: hidden; user-select: none; }
 input, textarea, select, button { font: inherit; color: inherit; }
 button { cursor: pointer; }
 a { color: var(--accent-2); text-decoration: none; }
@@ -660,3 +659,40 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius
 
 .user-note { font-size: 13.5px; padding: 8px 12px; margin: 8px 0; border-radius: 10px; background: var(--accent-soft, rgba(217,119,87,.12)); border: 1px solid var(--accent, #d97757); }
 .user-note span { display: block; font-size: 11px; opacity: .7; margin-bottom: 2px; }
+
+
+/* ───── Paletas (modo oscuro) ───── */
+:root[data-theme="dark"][data-palette="clasico"] { --c-bg: #262624; --c-sidebar: #1f1e1d; --surface: #30302e; --surface-2: #383835; --surface-3: #42413d; --user-bubble: #141413; --hover: rgba(250,249,245,.06); --active: rgba(250,249,245,.09); --border: rgba(222,220,209,.12); --border-strong: rgba(222,220,209,.2); --text: #faf9f5; --text-2: #cac7bd; --muted: #9b9890; --faint: #6e6c66; }
+:root[data-theme="dark"][data-palette="medianoche"] { --c-bg: #0c111b; --c-sidebar: #090d15; --surface: #131a28; --surface-2: #1a2336; --surface-3: #243049; --user-bubble: #070a11; --border: rgba(150,180,255,.13); --border-strong: rgba(150,180,255,.24); --hover: rgba(150,180,255,.07); --active: rgba(150,180,255,.12); --muted: #8e9ab5; --faint: #5f6b87; }
+:root[data-theme="dark"][data-palette="grafito"] { --c-bg: #151515; --c-sidebar: #0f0f0f; --surface: #1d1d1d; --surface-2: #262626; --surface-3: #313131; --user-bubble: #0a0a0a; --border: rgba(255,255,255,.1); --border-strong: rgba(255,255,255,.2); --hover: rgba(255,255,255,.06); --active: rgba(255,255,255,.1); --muted: #9a9a9a; --faint: #6a6a6a; --text: #f3f3f3; --text-2: #c9c9c9; }
+:root[data-theme="dark"][data-palette="bosque"] { --c-bg: #0e1613; --c-sidebar: #0a110f; --surface: #14201c; --surface-2: #1b2b26; --surface-3: #253b34; --user-bubble: #070d0b; --border: rgba(150,230,200,.12); --border-strong: rgba(150,230,200,.22); --hover: rgba(150,230,200,.07); --active: rgba(150,230,200,.11); --muted: #93aaa2; --faint: #647a72; }
+:root[data-theme="dark"][data-palette="carmesi"] { --c-bg: #19101a; --c-sidebar: #130a14; --surface: #221424; --surface-2: #2d1b30; --surface-3: #3c2540; --user-bubble: #0e070f; --border: rgba(255,170,220,.13); --border-strong: rgba(255,170,220,.23); --hover: rgba(255,170,220,.07); --active: rgba(255,170,220,.12); --muted: #b095ad; --faint: #7d6679; }
+
+/* ───── Toques modernos ───── */
+.btn { border-radius: 11px; }
+.btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 6px 22px color-mix(in oklab, var(--accent) 38%, transparent); }
+.btn.primary:hover { filter: brightness(1.08); }
+.composer, .composer-box { backdrop-filter: blur(14px); }
+.rail .rail-btn.active { background: linear-gradient(135deg, var(--accent-soft), transparent); }
+.search-trigger { backdrop-filter: blur(10px); }
+::-webkit-scrollbar-thumb { background: color-mix(in oklab, var(--accent) 28%, var(--surface-3)); border-radius: 8px; }
+
+/* ───── Fondos animados ───── */
+.fx { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; background: var(--c-bg); }
+#root { position: relative; z-index: 1; height: 100%; }
+:root:not([data-bg="none"]) .app { background: transparent; }
+:root:not([data-bg="none"]) { --bg: color-mix(in oklab, var(--c-bg) 55%, transparent); --bg-2: color-mix(in oklab, var(--c-bg) 38%, transparent); --sidebar: color-mix(in oklab, var(--c-sidebar) 62%, transparent); }
+:root:not([data-bg="none"]) .titlebar, :root:not([data-bg="none"]) .rail, :root:not([data-bg="none"]) .sidebar { backdrop-filter: blur(16px) saturate(1.2); }
+.fx-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.fx-aurora i { position: absolute; width: 55vmax; height: 55vmax; border-radius: 50%; filter: blur(90px); opacity: .5; animation: fx-float 22s ease-in-out infinite alternate; }
+.fx-aurora i:nth-child(1) { background: var(--accent); left: -12vmax; top: -18vmax; }
+.fx-aurora i:nth-child(2) { background: #1fb6d4; right: -16vmax; top: 6vmax; animation-duration: 28s; animation-delay: -6s; opacity: .38; }
+.fx-aurora i:nth-child(3) { background: #e0539f; left: 18vmax; bottom: -26vmax; animation-duration: 32s; animation-delay: -12s; opacity: .34; }
+.fx-aurora i:nth-child(4) { background: #3b82f6; right: 12vmax; bottom: -30vmax; animation-duration: 26s; animation-delay: -3s; opacity: .3; }
+@keyframes fx-float { 0% { transform: translate3d(0,0,0) scale(1); } 50% { transform: translate3d(6vmax,4vmax,0) scale(1.15); } 100% { transform: translate3d(-5vmax,8vmax,0) scale(.95); } }
+.fx-fluid { background: linear-gradient(120deg, color-mix(in oklab, var(--accent) 55%, var(--c-bg)), var(--c-bg) 30%, color-mix(in oklab, #1fb6d4 38%, var(--c-bg)) 55%, var(--c-bg) 75%, color-mix(in oklab, #e0539f 42%, var(--c-bg))); background-size: 300% 300%; animation: fx-flow 26s ease-in-out infinite; }
+@keyframes fx-flow { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+.fx-stars { background: radial-gradient(ellipse at 50% 120%, color-mix(in oklab, var(--accent) 30%, var(--c-bg)), var(--c-bg) 60%); }
+.fx-constellation { background: radial-gradient(ellipse at 20% 0%, color-mix(in oklab, var(--accent) 22%, var(--c-bg)), var(--c-bg) 65%); }
+.fx-waves { background: linear-gradient(180deg, var(--c-bg), color-mix(in oklab, var(--accent) 14%, var(--c-bg))); }
+@media (prefers-reduced-motion: reduce) { .fx-aurora i, .fx-fluid { animation: none; } }
