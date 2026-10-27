@@ -44,11 +44,23 @@ connect();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Las pestañas de trabajo de Nexo van en un grupo propio ("Nexo AI"), como el de Claude.
+let groupId = null;
+async function groupTab(tabId) {
+  try {
+    if (groupId != null) { try { await chrome.tabGroups.get(groupId); } catch { groupId = null; } }
+    groupId = await chrome.tabs.group(groupId != null ? { tabIds: tabId, groupId } : { tabIds: tabId });
+    await chrome.tabGroups.update(groupId, { title: 'Nexo AI', color: 'orange', collapsed: false });
+  } catch { /* tabGroups no disponible */ }
+}
+chrome.tabs.onCreated.addListener((t) => { if (nexoTab != null && t.openerTabId === nexoTab) groupTab(t.id); });
+
 async function getTab(create = false, url) {
   if (nexoTab != null) { try { return await chrome.tabs.get(nexoTab); } catch { nexoTab = null; } }
   if (!create) throw new Error('Aún no hay una pestaña de Nexo: usa action=navigate primero.');
   const t = await chrome.tabs.create({ url: url || 'about:blank', active: true });
   nexoTab = t.id;
+  await groupTab(t.id);
   return t;
 }
 
