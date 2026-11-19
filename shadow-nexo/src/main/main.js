@@ -336,6 +336,17 @@ const api = {
     if (r.canceled) return [];
     return opts.raw ? r.filePaths : r.filePaths.map(fileToAttachment);
   },
+  'bg.import': async () => {
+    const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'Imágenes y vídeos', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'avif', 'bmp', 'mp4', 'webm', 'mov', 'm4v'] }] });
+    if (r.canceled || !r.filePaths[0]) return null;
+    const src = r.filePaths[0], ext = path.extname(src).toLowerCase();
+    const bgDir = path.join(paths.getDataDir() || app.getPath('userData'), 'backgrounds');
+    fs.mkdirSync(bgDir, { recursive: true });
+    for (const f of fs.readdirSync(bgDir)) { try { fs.unlinkSync(path.join(bgDir, f)); } catch { } }
+    const dest = path.join(bgDir, 'fondo-' + Date.now() + ext);
+    fs.copyFileSync(src, dest);
+    return { url: encodeURI('file:///' + dest.replace(/\\/g, '/')), kind: ['.mp4', '.webm', '.mov', '.m4v'].includes(ext) ? 'video' : 'image', name: path.basename(src) };
+  },
   'app.readDropped': (list) => list.map((p) => { try { return fileToAttachment(p); } catch (e) { return { kind: 'error', name: path.basename(p), error: e.message }; } }),
   'app.relaunch': () => { app.relaunch(); app.exit(0); },
   'app.setTheme': (theme) => { nativeTheme.themeSource = theme === 'light' ? 'light' : theme === 'system' ? 'system' : 'dark'; updateOverlayColors(); },
