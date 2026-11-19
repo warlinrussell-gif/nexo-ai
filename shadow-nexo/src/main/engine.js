@@ -1,0 +1,1119 @@
+// Motor de conversación y agentes: bucle modelo ↔ herramientas, permisos, delegación
+// multi-modelo, modo comparar (varios modelos en paralelo) y pipeline (modelos por etapas).
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import { streamChat } from './providers.js';
+import { getProvider, listProviders } from './providers.js';
+import { listLocalModels } from './models.js';
+import { llama } from './llama.js';
+import { getChat, saveChat, saveAttachment, createChat } from './chats.js';
+import { getAgent, listAgents, memoryPrompt } from './agents.js';
+import { skillsPrompt, getSkill } from './skills.js';
+import { connectorsPrompt } from './conectores.js';
+import { pluginHooks } from './plugins.js';
+import { run as runCmd } from './util.js';
+import { allTools, needsApproval, execCommand } from './tools.js';
+import { dir } from './paths.js';
+import { uid, truncate } from './util.js';
+import * as opencode from './opencode.js';
+import { planMulti, staticBudget } from '../shared/fit.js';
+
+const MAX_IMAGES_IN_HISTORY = 3;
+
+// Palabras que indican que un grupo de herramientas hace falta en el mensaje (minúsculas, sin tildes).
+const GROUP_HINTS = {
+  files: /archivo|fichero|carpeta|directorio|codigo|código|proyecto|leer|lee |editar|edita|modifica|crear|escribe|buscar|busca|grep|glob|ruta|script|funcion|función|bug|error|compila|test|repo|git|\.js|\.py|\.ts|\.json|\.md|\.txt/,
+  system: /comando|terminal|ejecuta|ejecutar|proceso|abre|abrir|instala|instalar|portapapeles|powershell|shell|servicio|driver|hardware|disco|cpu|gpu|ram|temperatura|red|wifi/,
+  web: /web|internet|busca en|buscar en|noticias|precio|url|http|www|investiga|fuente/,
+  browser: /navega|navegador|pagina|página|web abierta|formulario|clic|haz click|url|sitio/,
+  memory: /recuerda|recordar|memoria|guarda esto|lo que te dije|antes|conversacion|conversación|chat anterior/,
+  skills: /skill|habilidad|receta|paso a paso|flujo/,
+  computer: /pantalla|captura|raton|ratón|teclado|escribe en|mueve el|screenshot/,
+  agents: /delega|agente|subtarea|explorador|investigador|en paralelo/,
+  mcp: /mcp|conector|servidor|integraci/,
+  app: /ajuste|configura|pestaña|pestana|sección|seccion|modelo|proveedor|api|tema|abre la|ve a /,
+  agente: /obscura|craft|ingenieria inversa|ingeniería inversa|clon|replica|endpoint|autonom|scrap|sigilo/,
+  obscura: /navega|navegar|entra en|entrar en|pincha|haz clic|rellena|rellenar|formulario|login|inicia sesion|iniciar sesión|cookies|extrae de|saca de|sitio web|pagina web|página web|indetectable|sigilo/
+};
+
+/** Conjunto compacto de herramientas para un turno: `core` siempre + grupos que el mensaje sugiere. */
+function selectToolsForMessage(all, messages) {
+  const last = [...messages].reverse().find((m) => m.role === 'user');
+  const text = String(typeof last?.content === 'string' ? last.content : (last?.content || []).map((p) => p.text || '').join(' ')).toLowerCase();
+  const groups = new Set(['core']);
+  for (const [g, re] of Object.entries(GROUP_HINTS)) if (re.test(text)) groups.add(g);
+  const picked = all.filter((t) => groups.has(t.group));
+  return picked.length ? picked : all;
+}
+const INSTRUCTION_FILES = ['AGENTS.md', 'NEXO.md', 'CLAUDE.md', path.join('.nexo', 'instructions.md')];
+const SUMMARY_PROMPT = `Eres el sistema de memoria de un asistente. Resume la conversación que te paso para que el asistente pueda continuar SIN perder nada importante. Incluye, con viñetas y de forma concreta:
+- Objetivo del usuario y sus peticiones (cita literalmente las órdenes cortas).
+- Decisiones tomadas y preferencias que expresó el usuario.
+- Archivos, rutas, comandos, URLs y datos clave, con sus resultados.
+- Estado actual de la tarea: qué está hecho y qué falta.
+- Errores encontrados y cómo se resolvieron.
+- Siguiente paso previsto.
+Máximo ~600 palabras. No inventes nada. Escribe en el idioma del usuario.`;
+
+// Resumen de CONTINUACIÓN para "continuar en sección nueva".
+// Mismo método que usa Claude Code al pasar de ventana: un resumen ESTRUCTURADO y
+// completo, pensado para que el asistente retome el trabajo con el mismo ritmo, sin
+// preguntar lo ya decidido ni perder detalles técnicos. No es un resumen "corto":
+// prioriza la completitud sobre la brevedad.
+const SUMMARY_BRIEF_PROMPT = `Tu tarea es generar un resumen de CONTINUACIÓN detallado de la conversación, para que un asistente pueda retomar EXACTAMENTE donde se quedó, sin perder el hilo ni el ritmo y sin volver a preguntar lo ya decidido. Otro asistente continuará solo con este resumen, así que debe bastarse por sí mismo.
+
+Escribe el resumen con estas secciones numeradas (omite una sección solo si de verdad no aplica):
+
+1. Petición e intención principal: qué quiere el usuario y para qué, con todos sus objetivos explícitos. Sé específico.
+2. Mensajes del usuario: lista en orden los mensajes/órdenes del usuario, citados lo más literalmente posible (sobre todo las órdenes cortas y las correcciones). Son clave para no desviarse.
+3. Conceptos y decisiones: conceptos técnicos, enfoques elegidos, preferencias y restricciones del usuario que deban respetarse.
+4. Archivos y código: rutas EXACTAS de archivos tocados o leídos y, para cada uno, qué se cambió y por qué. Incluye los fragmentos de código relevantes (funciones, comandos, valores concretos) tal cual, no los parafrasees.
+5. Errores y arreglos: problemas encontrados, su causa y cómo se resolvieron (o si siguen abiertos).
+6. Estado actual: qué está hecho y qué falta, con precisión (versiones, builds, lo que NO está probado o verificado).
+7. Siguiente paso concreto: la acción inmediata a realizar, encajada con la última petición del usuario.
+
+No hay límite estricto de longitud: sé tan extenso como haga falta para no perder información crítica, pero sin relleno ni cháchara. No inventes nada: si algo no consta, no lo supongas. Escribe en el idioma del usuario.`;
+
+/** Tokens aproximados de un mensaje (≈2,8 caracteres por token, prudente para español, código y números). */
+const CHARS_PER_TOKEN = 2.8;
+function estTokens(m) {
+  let n = 0;
+  if (typeof m.content === 'string') n += m.content.length;
+  else if (Array.isArray(m.content)) for (const c of m.content) n += c.type === 'text' ? c.text.length : 3000;
+  n += (m.images?.length || 0) * 3000;
+  n += JSON.stringify(m.tool_calls || []).length;
+  return n / CHARS_PER_TOKEN;
+}
+
+/** Copia de un mensaje sin campos internos de Nexo (_ci, _req…), que no deben llegar al proveedor. */
+function stripPrivate(m) { const o = {}; for (const k in m) if (!k.startsWith('_')) o[k] = m[k]; return o; }
+
+/** Firma de una llamada para detectar bucles (misma herramienta con los mismos argumentos). */
+function callKey(c) { return `${c.name}:${JSON.stringify(c.arguments || {})}`; }
+/** Firma "parecida": misma herramienta y mismo objetivo aunque cambie la posición (barridos línea a línea, scroll…). */
+function sweepKey(c) { const { offset, limit, amount, lines, max_results, ...rest } = c.arguments || {}; return `${c.name}:${JSON.stringify(rest)}`; }
+
+const CONTEXT_OVERFLOW = /exceed|context (size|length|window)|too (long|many tokens)|maximum context|n_ctx|prompt is too long/i;
+
+function contentText(c) {
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) return c.filter((x) => x.type === 'text').map((x) => x.text).join('\n') + (c.some((x) => x.type === 'image') ? ' [imagen]' : '');
+  return '';
+}
+
+/** Antepone un texto a un mensaje de usuario (string o multimodal). */
+function prependUser(text, m) {
+  if (typeof m.content === 'string') return { ...m, content: `${text}\n\n${m.content}` };
+  return { ...m, content: [{ type: 'text', text }, ...(m.content || [])] };
+}
+
+/** Instrucciones de proyecto (AGENTS.md / NEXO.md / CLAUDE.md) en la carpeta de trabajo y sus 3 carpetas superiores. */
+export function projectInstructions(workspace) {
+  const found = [];
+  let d = workspace;
+  for (let i = 0; i < 4 && d; i++) {
+    for (const f of INSTRUCTION_FILES) {
+      const p = path.join(d, f);
+      try {
+        const st = fs.statSync(p);
+        if (st.isFile() && st.size < 300e3) { found.push({ path: p, text: truncate(fs.readFileSync(p, 'utf8'), 20000) }); break; }
+      } catch { }
+    }
+    const up = path.dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  return found.reverse(); // de la carpeta más general a la más concreta
+}
+
+export class Engine extends EventEmitter {
+  constructor({ getSettings, getHardware, requestApproval, askUser, webKeys, appCall, navigate, uiState }) {
+    super();
+    this.getSettings = getSettings;
+    this.getHardware = getHardware;
+    this.requestApproval = requestApproval;
+    this.askUser = askUser;
+    this.webKeys = webKeys;
+    this.appCall = appCall;
+    this.navigate = navigate;
+    this.uiState = uiState;
+    this.runs = new Map();
+    this.localCache = { t: 0, list: [] };
+  }
+
+  async localModels(force = false) {
+    if (force || Date.now() - this.localCache.t > 8000) this.localCache = { t: Date.now(), list: await listLocalModels() };
+    return this.localCache.list;
+  }
+
+  async defaultModelRef() {
+    const s = this.getSettings();
+    if (s.defaultModel) return s.defaultModel;
+    const locals = await this.localModels();
+    if (locals[0]) return `local:${locals[0].id}`;
+    for (const p of listProviders()) {
+      if (!p.enabled) continue;
+      const m = p.customModels?.[0] || p.models?.[0]?.id;
+      if (m) return `${p.id}:${m}`;
+    }
+    return null;
+  }
+
+  async modelLabel(ref) {
+    if (!ref) return 'Sin modelo';
+    const [pid, ...rest] = ref.split(':');
+    const id = rest.join(':');
+    if (pid === 'local') { const m = (await this.localModels()).find((x) => x.id === id); return m ? `${m.name}` : id.split('/').pop(); }
+    const p = getProvider(pid);
+    return `${id}${p ? ` · ${p.name}` : ''}`;
+  }
+
+  /** Resuelve una referencia de modelo a un destino de API (cargando el modelo local si hace falta). */
+  async resolveTarget(ref, onStatus) {
+    if (!ref) ref = await this.defaultModelRef();
+    if (!ref) throw new Error('No hay ningún modelo disponible. Descarga uno en "Modelos" o añade una clave API en Ajustes → Proveedores.');
+    const [pid, ...rest] = ref.split(':');
+    const id = rest.join(':');
+    if (pid === 'local') {
+      const model = (await this.localModels()).find((m) => m.id === id) || (await this.localModels(true)).find((m) => m.id === id);
+      if (!model) throw new Error('El modelo local ya no existe: ' + id);
+      onStatus?.('loading');
+      const inst = await llama.ensureLoaded(model);
+      return { ref, localId: model.id, label: model.name, ctx: inst.ctx, target: { kind: 'openai', type: 'local', baseUrl: `http://127.0.0.1:${inst.port}/v1`, apiKey: '', model: model.name, vision: !!inst.mmproj } };
+    }
+    const p = getProvider(pid);
+    if (!p) throw new Error(`Proveedor "${pid}" no configurado`);
+    if (!p.enabled) throw new Error(`El proveedor ${p.name} está desactivado`);
+    // Ventana de contexto REAL: override del proveedor → ventana descubierta del modelo → 128000 por defecto.
+    // Si se deja el falso 128000 cuando el servidor acepta mucho menos, el servidor corta a mitad de
+    // respuesta y Nexo compacta a la fuerza (sensación de "me corta el chat siempre").
+    const modelCtx = Number((p.models || []).find((m) => m.id === id)?.ctx) || 0;
+    const cw = Number(p.ctx) > 0 ? Number(p.ctx) : (modelCtx > 0 ? modelCtx : 128000);
+    return { ref, label: id, ctx: cw, target: { kind: p.kind, type: p.type, baseUrl: p.baseUrl, apiKey: p.apiKey, headers: p.headers, model: id, vision: true } };
+  }
+
+  workspaceFor(chat) {
+    const s = this.getSettings();
+    return chat?.workspace || s.workspace || dir('workspace');
+  }
+
+  systemPrompt(agent, { toolsOn, stage, chat, brief } = {}) {
+    const s = this.getSettings();
+    const now = new Date();
+    const ws = this.workspaceFor(chat);
+    let sp = agent.systemPrompt || '';
+    sp += `\n\n## Entorno\n- Sistema: ${os.type()} ${os.release()} · Usuario: ${os.userInfo().username} · Carpeta personal: ${os.homedir()}\n- Directorio de trabajo${chat?.workspace ? ' de este chat (proyecto)' : ' por defecto'}: ${ws}\n- Idioma: responde en el idioma del usuario (por defecto, español).`;
+    if (toolsOn) sp += `\n\n## Uso de herramientas\n- Tienes herramientas REALES que actúan sobre el ordenador del usuario. Úsalas directamente en lugar de explicar cómo hacerlo, salvo que te pidan solo explicación.\n- Encadena varias herramientas si hace falta; si una falla, lee el error y prueba otra vía.\n- Para tareas de 3 o más pasos, muestra un plan con update_plan al empezar y actualízalo al terminar cada paso (exactamente un paso in_progress a la vez; márcalo done en cuanto acabe, no al final de todo).\n- Antes de editar un archivo, léelo (read_file) y copia el texto exacto en edit_file; para varios cambios en el mismo archivo usa multi_edit. Tras cambiar código, verifica (compilar, tests o ejecutar) y corrige hasta que funcione.\n- Para encontrar código usa grep (contenido, regex) y glob (nombres de archivo) en lugar de comandos de terminal; son rápidos e ignoran node_modules/.git. Haz varias búsquedas independientes en la misma respuesta cuando puedas.\n- Cambios mínimos y precisos: no reescribas archivos enteros para cambiar unas líneas, y sigue el estilo del código existente.\n- Si hay herramientas MCP sin cargar, aparecen en tool_search: cárgalas con query="select:nombre" antes de usarlas.\n- Para explorar a fondo un proyecto grande o investigar algo aparte, delega en el agente explorer con delegate_task (si está disponible) para no llenar tu contexto. Los procesos largos (servidores) van con background=true y su salida se lee con process_output.\n- NUNCA preguntes al usuario algo que puedes averiguar tú con tus herramientas (qué archivos hay, dónde está una función, qué lenguaje usa el proyecto): búscalo con grep/glob/list_directory y actúa. Empieza a trabajar en tu primera respuesta.
+- Solo si hay una decisión que de verdad le corresponde al usuario, usa ask_user en vez de adivinar.\n- No inventes resultados: básate en lo que devuelven las herramientas.`;
+    const instr = projectInstructions(ws);
+    if (instr.length) sp += `\n\n## Instrucciones del proyecto\nEl usuario ha dejado estas instrucciones en archivos del proyecto. Síguelas siempre:\n${instr.map((f) => `\n### ${f.path}\n${f.text}`).join('\n')}`;
+    sp += `\n- Formatea con Markdown cuando ayude (títulos, listas, tablas, bloques de código con lenguaje).`;
+    if (s.customInstructions) sp += `\n\n## Instrucciones personalizadas del usuario\n${s.customInstructions}`;
+    if (globalThis.__nexoVoiceOn && !agent.voice) sp += `\n\n## Modo voz\nEl usuario te habla por voz y tu respuesta se lee en voz alta: contesta en 1 a 3 frases naturales, sin markdown, listas, tablas ni emojis, salvo que pida detalle.`;
+    sp += memoryPrompt();
+    if (toolsOn) sp += connectorsPrompt(s, agent);
+    // Control "Humor" del panel de voz (0 = serio, 1 = sarcástico). En el punto medio no se añade nada.
+    const hu = Number(s.voice?.humor);
+    if (Number.isFinite(hu) && (hu < 0.45 || hu >= 0.7)) sp += `\n\n## Tono\n${hu < 0.2 ? 'Responde de forma seria y directa, sin bromas.' : hu < 0.45 ? 'Responde con tono sobrio; evita las bromas salvo que el usuario las inicie.' : hu < 0.9 ? 'Puedes ser ingenioso y hacer alguna broma ligera, sin perder precisión ni alargar la respuesta.' : 'Usa un humor seco y sarcástico al estilo de un mayordomo ingenioso, sin faltar al respeto ni perder precisión.'}`;
+    if (agent.tools?.includes('skills')) sp += skillsPrompt(agent.skills);
+    if (toolsOn && agent.tools?.includes('skills')) sp += `\n\n## Aprender de la experiencia\n- Si acabas de resolver una tarea compleja (unos 5 pasos o más) con un método que se puede repetir, o el usuario te corrigió y encontraste la forma buena, al terminar ofrécele guardarlo como skill: pregunta con ask_user y, solo si acepta, usa skill_create.\n- Para trabajos repetibles, el usuario puede lanzar una skill escribiendo /nombre.`;
+    if (toolsOn && s.autoVerify !== false) sp += `\n\n## Verificación automática\nDespués de modificar código o archivos de un proyecto, comprueba que funciona: ejecuta los tests, el linter o la compilación del proyecto (por ejemplo npm test, npm run build, pytest, cargo check; búscalos en package.json/README) y corrige los errores hasta que pasen antes de dar la tarea por terminada.`;
+    // Lo que cambia (fecha) va al FINAL: el prefijo del prompt queda idéntico entre mensajes y se aprovecha la caché de prompt de DeepSeek/Anthropic (hasta -75 % de coste).
+    sp += `\n\n## Fecha\nHoy es ${now.toLocaleDateString('es-ES', { dateStyle: 'full' })} (${Intl.DateTimeFormat().resolvedOptions().timeZone}).`;
+    if (brief && toolsOn) sp += `\n\n## Estilo de respuesta\n- Sé breve: como mucho dos frases de texto antes de actuar. No describas pasos ni planes en prosa; actúa.\n- Para usar una herramienta, haz la llamada directamente. Nunca escribas el JSON de la llamada en el mensaje.\n- Espera el resultado de la herramienta antes de seguir; no inventes resultados.`;
+    if (stage) sp +=`\n\n## Flujo de trabajo por etapas\nEstás en la etapa ${stage.index + 1} de ${stage.total}: **${stage.label}**.\nTu cometido en esta etapa: ${stage.instruction || 'continuar el trabajo'}\nEntrega el resultado de tu etapa de forma completa para que la siguiente etapa pueda usarlo.`;
+    return sp;
+  }
+
+  /** Convierte el historial guardado en mensajes para el modelo. */
+  historyToMessages(chat, { variant = 0, uptoIndex } = {}) {
+    const msgs = [];
+    const end = uptoIndex !== undefined ? uptoIndex : chat.messages.length;
+    // Si la conversación ya se compactó, se empieza en el resumen en vez de en los mensajes antiguos
+    const sum = chat.summary && chat.summary.upto <= end ? chat.summary : null;
+    const start = sum ? sum.upto : 0;
+    const list = chat.messages.slice(start, end);
+    for (let li = 0; li < list.length; li++) {
+      const m = list[li];
+      const ci = start + li;
+      const at = msgs.length;
+      if (m.role === 'user') {
+        const parts = [];
+        let text = m.content || '';
+        if (m.skillInvoke) { const sk = getSkill(m.skillInvoke); if (sk) text = `[El usuario ha lanzado la skill "${sk.name}". Sigue estas instrucciones:]
+${sk.content}
+
+[Solicitud del usuario]
+${m.skillArgs || 'Aplica la skill a lo que estábamos haciendo.'}`; }
+        for (const a of m.attachments || []) {
+          if (a.kind === 'image' && a.file && fs.existsSync(a.file)) parts.push({ type: 'image', mime: a.mime, data: fs.readFileSync(a.file).toString('base64') });
+          else if (a.kind === 'text') text += `\n\n--- Archivo adjunto: ${a.name} ---\n${truncate(a.text || '', 60000)}\n--- fin de ${a.name} ---`;
+          else if (a.path) text += `\n\n[Archivo adjunto en el disco: ${a.path}]`;
+        }
+        msgs.push(parts.length ? { role: 'user', content: [{ type: 'text', text }, ...parts] } : { role: 'user', content: text });
+      } else if (m.role === 'assistant') {
+        const blocks = m.variants ? (m.variants[variant] || m.variants[0])?.blocks || [] : m.blocks || [];
+        const steps = new Map();
+        for (const b of blocks) {
+          if (!['text', 'tool'].includes(b.type) && b.type !== 'thinking_block') continue;
+          const k = b.step || 0;
+          if (!steps.has(k)) steps.set(k, []);
+          steps.get(k).push(b);
+        }
+        for (const [, bs] of [...steps.entries()].sort((a, b) => a[0] - b[0])) {
+          const ocNotes = bs.filter((b) => b.type === 'tool' && b.name?.startsWith('oc:')).map((b) => `[OpenCode · ${b.name.slice(3)} ${truncate(JSON.stringify(b.args || {}), 200)} → ${truncate(b.result || b.error || '', 300)}]`);
+          const text = bs.filter((b) => b.type === 'text').map((b) => b.text).join('') + (ocNotes.length ? `\n${ocNotes.join('\n')}` : '');
+          const tools = bs.filter((b) => b.type === 'tool' && !b.name?.startsWith('oc:'));
+          const thinking = bs.filter((b) => b.type === 'thinking_block').map((b) => b.block);
+          if (!text && !tools.length) continue;
+          msgs.push({ role: 'assistant', content: text, tool_calls: tools.map((t) => ({ id: t.id, name: t.name, arguments: t.args })), thinking_blocks: thinking });
+          for (const t of tools) {
+            msgs.push({
+              role: 'tool', tool_call_id: t.id, name: t.name, isError: t.status === 'error',
+              content: t.status === 'denied' ? 'El usuario denegó esta acción.' : (t.result || (t.status === 'error' ? `Error: ${t.error}` : '(sin salida)')),
+              imageFiles: (t.images || []).map((im) => im.file)
+            });
+          }
+        }
+      }
+      for (let k = at; k < msgs.length; k++) msgs[k]._ci = ci;
+    }
+    if (sum) {
+      const text = `[Resumen de la conversación anterior (compactada para ahorrar contexto)]\n${sum.text}\n[Fin del resumen]`;
+      if (msgs[0]?.role === 'user') msgs[0] = prependUser(text, msgs[0]);
+      else msgs.unshift({ role: 'user', content: text, _ci: start - 1 });
+    }
+    // imágenes de herramientas: solo las más recientes (ahorro de contexto)
+    let budget = MAX_IMAGES_IN_HISTORY;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m.role !== 'tool' || !m.imageFiles?.length) continue;
+      if (budget > 0) {
+        m.images = m.imageFiles.filter((f) => fs.existsSync(f)).map((f) => ({ data: fs.readFileSync(f).toString('base64'), mime: f.endsWith('.png') ? 'image/png' : 'image/jpeg' }));
+        budget -= m.images.length;
+      } else m.content += '\n[captura antigua omitida]';
+      delete m.imageFiles;
+    }
+    for (const m of msgs) delete m.imageFiles;
+    return msgs;
+  }
+
+  trimToContext(messages, ctx, toolsSize = 0) {
+    const est = estTokens;
+    const budget = Math.max(2048, ctx * 0.8 - toolsSize / CHARS_PER_TOKEN - 1024);
+    let total = messages.reduce((a, m) => a + est(m), 0);
+    if (total <= budget) return messages;
+    const out = [...messages];
+    // primero recortar resultados de herramientas antiguos
+    for (let i = 1; i < out.length - 4 && total > budget; i++) {
+      const m = out[i];
+      if (m.role === 'tool' && typeof m.content === 'string' && m.content.length > 1500) {
+        const before = est(m);
+        out[i] = { ...m, content: truncate(m.content, 1200), images: undefined };
+        total -= before - est(out[i]);
+      }
+    }
+    // después eliminar turnos antiguos completos (manteniendo el sistema)
+    while (total > budget && out.length > 3) {
+      const idx = 1;
+      const removed = out.splice(idx, 1)[0];
+      total -= est(removed);
+      while (out[idx] && out[idx].role === 'tool') total -= est(out.splice(idx, 1)[0]);
+    }
+    if (out[1]?.role === 'assistant') out.splice(1, 0, { role: 'user', content: '(se omitieron mensajes antiguos por límite de contexto)' });
+    return out;
+  }
+
+  /** Resume mensajes con el propio modelo (sin herramientas). */
+  async summarize(resolved, msgs, signal, { brief = false } = {}) {
+    const lines = msgs.map((m) => {
+      if (m.role === 'user') return `USUARIO: ${contentText(m.content)}`;
+      if (m.role === 'assistant') return `ASISTENTE: ${m.content || ''}${m.tool_calls?.length ? '\n' + m.tool_calls.map((t) => `→ ${t.name}(${truncate(JSON.stringify(t.arguments || {}), 300)})`).join('\n') : ''}`;
+      if (m.role === 'tool') return `RESULTADO de ${m.name}: ${truncate(String(m.content || ''), 1200)}`;
+      return '';
+    }).filter(Boolean);
+    let transcript = lines.join('\n\n');
+    const maxChars = Math.max(6000, Math.floor((resolved.ctx || 8192) * 0.5 * CHARS_PER_TOKEN));
+    if (transcript.length > maxChars) transcript = transcript.slice(0, Math.floor(maxChars * 0.3)) + '\n\n[… parte intermedia omitida …]\n\n' + transcript.slice(-Math.floor(maxChars * 0.7));
+    let text = '';
+    for await (const ev of streamChat(resolved.target, { messages: [{ role: 'system', content: brief ? SUMMARY_BRIEF_PROMPT : SUMMARY_PROMPT }, { role: 'user', content: `Conversación a resumir:\n\n${transcript}\n\nEscribe ahora el resumen.` }], tools: [], signal, temperature: 0.2 })) {
+      if (ev.type === 'text') text += ev.delta;
+    }
+    return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  }
+
+  /**
+   * Compactación automática (como Claude Code): cuando la conversación se acerca al límite de contexto,
+   * resume la parte antigua con el propio modelo y sigue trabajando con el resumen + lo reciente.
+   */
+  async compactIfNeeded({ convo, resolved, toolsSize, signal, sink, chat, force = false }) {
+    if (this.getSettings().autoCompact === false && !force) return false;
+    const ctx = resolved.ctx || 8192;
+    const budget = Math.max(2048, ctx * 0.8 - toolsSize / CHARS_PER_TOKEN - 1024);
+    const total = convo.reduce((a, m) => a + estTokens(m), 0);
+    if ((!force && total <= budget * 0.85) || convo.length < 4) return false;
+    const reqIdx = convo.findLastIndex((m) => m._req);
+    // Fase 1 (sin coste): acortar los resultados antiguos de herramientas del turno actual (se conservan los 2 últimos)
+    const turnTools = convo.map((m, i) => (m.role === 'tool' && i > reqIdx ? i : -1)).filter((i) => i >= 0).slice(0, -2);
+    let shortened = 0;
+    for (const i of turnTools) {
+      const m = convo[i];
+      if (typeof m.content === 'string' && m.content.length > 900) { convo[i] = { ...m, content: `${truncate(m.content, 800)}\n[resultado antiguo acortado para ahorrar contexto]`, images: undefined }; shortened++; }
+    }
+    if (shortened && !force && convo.reduce((a, m) => a + estTokens(m), 0) <= budget * 0.85) return true;
+    if (!force && convo.compactedLen && convo.length < convo.compactedLen + 4) return false;
+    // Fase 2: resumir con el modelo lo anterior a la petición actual (la petición en curso nunca se resume)
+    let keep = 0, cut = convo.length;
+    while (cut > 2 && keep + estTokens(convo[cut - 1]) < budget * 0.35) { cut--; keep += estTokens(convo[cut]); }
+    while (cut > 1 && convo[cut]?.role === 'tool') cut--; // no separar una llamada de su resultado
+    if (reqIdx > 0) cut = Math.min(cut, reqIdx);
+    if (cut <= 2) return shortened > 0;
+    const head = convo.slice(1, cut);
+    sink.status('compacting');
+    let summary = '';
+    try { summary = await this.summarize(resolved, head, signal); } catch (e) { if (signal.aborted) throw e; }
+    if (!summary) return false;
+    const text = `[Resumen automático de la conversación anterior (compactada para liberar contexto)]\n${summary}\n[Fin del resumen. Continúa la tarea desde aquí.]`;
+    let tail = convo.slice(cut);
+    if (tail[0]?.role === 'user') tail[0] = prependUser(text, tail[0]);
+    else tail = [{ role: 'user', content: text }, ...tail];
+    convo.splice(1, convo.length - 1, ...tail);
+    convo.compactedLen = convo.length;
+    // Persistir para los siguientes mensajes: el resumen cubre los mensajes del chat que quedaron enteros en la parte resumida
+    if (chat) {
+      const headCi = head.map((m) => m._ci).filter((x) => x !== undefined && x >= 0);
+      const tailCi = tail.map((m) => m._ci).filter((x) => x !== undefined && x >= 0);
+      if (headCi.length) {
+        const upto = (tailCi.length ? Math.min(Math.max(...headCi) + 1, Math.min(...tailCi)) : Math.max(...headCi) + 1);
+        if (upto > (chat.summary?.upto || 0)) chat.summary = { text: summary, upto, at: Date.now() };
+      }
+    }
+    sink.notice(`Contexto compactado: resumí ${head.length} mensajes antiguos para seguir trabajando sin perder el hilo.`);
+    return true;
+  }
+
+  /**
+   * Crea un chat NUEVO que arranca con un resumen del chat actual, para seguir el mismo hilo
+   * liberando el contexto (como abrir una "sección nueva" de la misma conversación).
+   * Devuelve el chat nuevo (ya guardado); el modelo verá el resumen como contexto y el
+   * usuario verá un primer mensaje con ese resumen.
+   */
+  async forkToNewSection(chatId, { carry = true } = {}) {
+    const chat = getChat(chatId);
+    if (!chat) throw new Error('Chat no encontrado');
+    if (this.runs.has(chatId)) throw new Error('Espera a que termine la respuesta en curso antes de continuar en una sección nueva.');
+    const agent = getAgent(chat.agentId);
+    const base = (chat.title || 'Chat').replace(/\s*\((?:cont\.(?:\s*\d+)?|nueva)\)\s*$/i, '').trim();
+
+    // Sección EN BLANCO: un chat nuevo totalmente independiente, sin arrastrar NADA del chat viejo
+    // (ni resumen). Solo hereda los ajustes: mismo modelo, agente, carpeta y herramientas.
+    if (!carry) {
+      const fresh = createChat({
+        title: `${base} (nueva)`,
+        agentId: chat.agentId, model: chat.model, mode: chat.mode,
+        compareModels: chat.compareModels, pipeline: chat.pipeline,
+        folder: chat.folder, workspace: chat.workspace, reasoningEffort: chat.reasoningEffort
+      });
+      fresh.toolsOverride = chat.toolsOverride?.length ? chat.toolsOverride : null;
+      fresh.permissionMode = chat.permissionMode;
+      saveChat(fresh, true);
+      this.emit('chat-meta', { chatId: fresh.id, title: fresh.title });
+      return fresh;
+    }
+
+    const ref = chat.model || agent.model || null;
+    const resolved = await this.resolveTarget(ref);
+    const history = this.historyToMessages(chat);
+    const controller = new AbortController();
+    let summary = '';
+    try { summary = await this.summarize(resolved, history, controller.signal, { brief: true }); } catch { }
+    if (!summary) summary = 'No se pudo generar un resumen automático. Continúa el hilo con el usuario a partir de lo que diga.';
+    // Título: base + (cont. N)
+    const part = (chat._contPart || 1) + 1;
+    const fresh = createChat({
+      title: `${base} (cont. ${part})`,
+      agentId: chat.agentId, model: chat.model, mode: chat.mode,
+      compareModels: chat.compareModels, pipeline: chat.pipeline,
+      folder: chat.folder, workspace: chat.workspace, reasoningEffort: chat.reasoningEffort
+    });
+    // No heredar un "herramientas apagadas" ([]): una sección nueva es para seguir trabajando, con herramientas.
+    fresh.toolsOverride = chat.toolsOverride?.length ? chat.toolsOverride : null;
+    fresh.permissionMode = chat.permissionMode;
+    fresh._contPart = part;
+    // Mensaje visible para el usuario (índice 0). No se reenvía al modelo: summary.upto = 1 lo salta.
+    fresh.messages.push({
+      id: uid('m_'), role: 'assistant', agentId: agent.id, agentName: agent.name, status: 'done', createdAt: Date.now(),
+      blocks: [{ type: 'text', text: `📋 **Sección nueva — continúa el mismo hilo.**\n\nResumen de la conversación anterior (el modelo lo tiene como contexto):\n\n${summary}` }]
+    });
+    // El modelo recibe el resumen como contexto a través de chat.summary (sin duplicarlo con el mensaje visible).
+    fresh.summary = { text: summary, upto: 1, at: Date.now(), from: chatId };
+    saveChat(fresh, true);
+    this.emit('chat-meta', { chatId: fresh.id, title: fresh.title });
+    return fresh;
+  }
+
+  // ───────── Puntos de restauración de archivos (deshacer cambios del agente) ─────────
+  checkpointFile(chatId, messageId) { return path.join(dir('checkpoints'), chatId, `${messageId}.json`); }
+
+  async checkpoint(chatId, messageId, filePath) {
+    if (!chatId || !messageId || !filePath) return;
+    const manPath = this.checkpointFile(chatId, messageId);
+    let man = { files: [] };
+    try { man = JSON.parse(fs.readFileSync(manPath, 'utf8')); } catch { }
+    if (man.files.some((f) => f.path === filePath)) return;
+    let existed = false, backup = null, isDir = false;
+    try {
+      const st = fs.statSync(filePath);
+      existed = true;
+      isDir = st.isDirectory();
+      if (!isDir && st.size < 60e6) {
+        backup = path.join(path.dirname(manPath), `${messageId}-${man.files.length}.bak`);
+        fs.mkdirSync(path.dirname(backup), { recursive: true });
+        fs.copyFileSync(filePath, backup);
+      }
+    } catch { }
+    if (isDir) return; // las carpetas no se guardan (las borradas van a la papelera)
+    man.files.push({ path: filePath, existed, backup, at: Date.now() });
+    fs.mkdirSync(path.dirname(manPath), { recursive: true });
+    fs.writeFileSync(manPath, JSON.stringify(man));
+    const run = this.runs.get(chatId);
+    if (run?.message?.id === messageId) { run.message.checkpoint = man.files.length; run.message.changedFiles = man.files.map((f) => f.path); this.emitMessage(chatId, run.message); }
+  }
+
+  /** Restaura los archivos tal como estaban antes de la respuesta indicada (y de todas las posteriores). */
+  rewind(chatId, messageId) {
+    const chat = getChat(chatId);
+    if (!chat) throw new Error('Chat no encontrado');
+    const idx = chat.messages.findIndex((m) => m.id === messageId);
+    if (idx < 0) throw new Error('Mensaje no encontrado');
+    const later = chat.messages.slice(idx).filter((m) => m.role === 'assistant');
+    let restored = 0, removed = 0;
+    for (const m of later.reverse()) {
+      const manPath = this.checkpointFile(chatId, m.id);
+      let man;
+      try { man = JSON.parse(fs.readFileSync(manPath, 'utf8')); } catch { continue; }
+      for (const f of man.files.slice().reverse()) {
+        try {
+          if (f.backup && fs.existsSync(f.backup)) { fs.mkdirSync(path.dirname(f.path), { recursive: true }); fs.copyFileSync(f.backup, f.path); restored++; }
+          else if (!f.existed && fs.existsSync(f.path)) { fs.rmSync(f.path, { force: true }); removed++; }
+        } catch { }
+      }
+      if (m.gitCommit && m.gitRoot) { // el commit automático de esa tarea se retira (los archivos ya se restauraron)
+        try { const head = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: m.gitRoot }).toString().trim(); if (head === m.gitCommit) execFileSync('git', ['reset', '--mixed', 'HEAD~1'], { cwd: m.gitRoot }); } catch { /* sin git */ }
+        m.gitCommit = null;
+      }
+      m.rewound = true;
+      m.checkpoint = 0;
+      try { fs.rmSync(manPath, { force: true }); } catch { }
+    }
+    saveChat(chat, true);
+    for (const m of later) this.emitMessage(chatId, m, true);
+    return { restored, removed };
+  }
+
+  // ───────── Hooks (comandos del usuario antes/después de las herramientas y al terminar) ─────────
+  async runHooks(event, { tool, args, result, chat }) {
+    const hooks = [...(this.getSettings().hooks || []), ...pluginHooks()].filter((h) => h && h.enabled !== false && h.event === event && h.command);
+    const out = [];
+    for (const h of hooks) {
+      if (tool && h.match) { try { if (!new RegExp(h.match, 'i').test(tool)) continue; } catch { continue; } }
+      const r = await execCommand(h.command, {
+        cwd: this.workspaceFor(chat), timeout: Math.min(300, h.timeout || 30),
+        env: { NEXO_EVENT: event, NEXO_TOOL: tool || '', NEXO_ARGS: JSON.stringify(args || {}).slice(0, 30000), NEXO_RESULT: String(result || '').slice(0, 30000), NEXO_CHAT_ID: chat?.id || '', NEXO_WORKSPACE: this.workspaceFor(chat) }
+      });
+      out.push({ hook: h, ...r });
+    }
+    return out;
+  }
+
+  emitMessage(chatId, message, force = false) {
+    const now = Date.now();
+    if (!force && message._lastEmit && now - message._lastEmit < 45) {
+      if (!message._pending) { message._pending = setTimeout(() => { message._pending = null; this.emitMessage(chatId, message, true); }, 50); }
+      return;
+    }
+    message._lastEmit = now;
+    const { _lastEmit, _pending, ...clean } = message;
+    this.emit('message', { chatId, message: clean });
+  }
+
+  isRunning(chatId) { return this.runs.has(chatId); }
+
+  /** Instrucción nueva con el agente trabajando: los agentes de Nexo la leen en el siguiente paso; OpenCode se interrumpe y continúa con ella. */
+  steer(chatId, { text, attachments = [] } = {}) {
+    const run = this.runs.get(chatId);
+    const t = String(text || '').trim();
+    if (!run) return this.send(chatId, { text, attachments });
+    if (!t) return null;
+    run.steer.push(t);
+    run.sink?.userNote(t);
+    if (run.opencode) { run.redirect = true; run.inner?.abort(); }
+    return null;
+  }
+
+  /** Mensajes del usuario recibidos durante la ejecución (solo el agente principal). */
+  drainSteer(chatId) {
+    const run = this.runs.get(chatId);
+    if (!run?.steer.length) return [];
+    return run.steer.splice(0);
+  }
+
+  stop(chatId) {
+    const r = this.runs.get(chatId);
+    if (r) r.controller.abort();
+  }
+
+  /**
+   * Bucle agente: modelo → herramientas → modelo... escribiendo en `sink.blocks`.
+   */
+  async agentLoop({ chatId, agent, ref, messages, sink, signal, depth = 0, stage, chat }) {
+    const s = this.getSettings();
+    const groups = chat?.toolsOverride || agent.tools || [];
+    const toolCtx = {
+      settings: this.getSettings, workspace: this.workspaceFor(chat), hardware: this.getHardware, webKeys: this.webKeys,
+      askUser: this.askUser ? (q, sig) => this.askUser({ chatId, ...q }, sig) : null,
+      agents: () => listAgents().filter((a) => a.id !== agent.id),
+      delegate: depth < 2 && groups.includes('agents') ? (args, c) => this.delegate(args, { chatId, parentRef: ref, sink: c.sink, signal, depth, chat }) : null,
+      app: this.appCall ? { call: this.appCall, navigate: this.navigate, state: this.uiState } : null,
+      resolveModel: async (ref) => (await this.resolveTarget(ref || chat?.model || s.defaultModel)).target
+    };
+    let tools = s.toolsEnabled === false ? [] : allTools(toolCtx, groups, agent.mcpServers);
+    // agentes de solo lectura (explorer): ninguna herramienta que escriba o ejecute
+    if (agent.readOnly) tools = tools.filter((t) => t.risk === 'read' && !['memory_save', 'memory_forget', 'memory_write', 'skill_create', 'clipboard_write', 'notify'].includes(t.name));
+    // Modelos locales con contexto pequeño: el esquema de TODAS las herramientas (~4.8k tokens) se come el hueco para responder.
+    // Se envían solo los grupos que el último mensaje del usuario sugiere; si el modelo pide una que no estaba, se reintenta con todas.
+    const fullTools = tools;
+    let needFull = false;
+    let toolNudges = 0;
+    const resolved = await this.resolveTarget(ref, (st) => { sink.status('loading-model'); });
+    sink.setModel(resolved);
+    const compact = !!resolved.localId && (resolved.ctx || 0) <= 32768 && fullTools.length > 12;
+    if (compact) tools = selectToolsForMessage(fullTools, messages);
+    const sys = { role: 'system', content: this.systemPrompt(agent, { toolsOn: tools.length > 0, stage, chat, brief: !!resolved.localId }) };
+    let convo = [sys, ...messages];
+    const reqAt = convo.findLastIndex((m) => m.role === 'user');
+    if (reqAt > 0) convo[reqAt] = { ...convo[reqAt], _req: true };
+    const mode = chat?.permissionMode || s.permissions?.mode || 'smart';
+    const allowAlways = chat?.allowAlways || {};
+    const maxSteps = agent.maxSteps || 30;
+    const measureTools = () => JSON.stringify(tools.map((t) => [t.name, t.description, t.parameters])).length;
+    let toolsSize = measureTools();
+    let finalText = '';
+    let step = sink.nextStep();
+    const repeats = new Map();
+    let sweep = 0, lastSweep = null;
+    let finished = false;
+    let planNudges = 0;
+    let ctxWarned = false;
+    if (resolved.localId) llama.acquire(resolved.localId);
+    try {
+      for (let iter = 0; iter < maxSteps; iter++) {
+        if (signal.aborted) break;
+        if (depth === 0) for (const t of this.drainSteer(chatId)) convo.push({ role: 'user', content: `[Mensaje nuevo del usuario mientras trabajabas — tenlo en cuenta y ajusta lo que estás haciendo]
+${t}` });
+        await this.compactIfNeeded({ convo, resolved, toolsSize, signal, sink, chat: depth === 0 ? chat : null });
+        sink.status('thinking');
+        let trimmed = this.trimToContext(convo, resolved.ctx || 8192, toolsSize).map(stripPrivate);
+        // Fallback: si en el paso anterior el modelo pidió una herramienta que no estaba en el conjunto compacto, ampliamos a todas.
+        if (compact && needFull) tools = fullTools;
+        const calls = [];
+        let text = '';
+        let reasoning = '';
+        const thinkingBlocks = [];
+        const t0 = Date.now();
+        let firstToken = 0;
+        const stream = () => streamChat(resolved.target, {
+          messages: trimmed, tools, signal,
+          // tope por paso en modelos locales: si el modelo se descontrola (texto o llamada mal formada) no puede llenar todo el contexto
+          maxTokens: resolved.localId ? Math.max(1024, Math.min(8192, Math.floor((resolved.ctx || 8192) / 2))) : undefined,
+          temperature: chat?.temperature ?? agent.temperature,
+          reasoningEffort: (agent.voice || globalThis.__nexoVoiceOn) ? 'none' : (chat?.reasoningEffort || s.reasoningEffort),
+          thinkingBudget: resolved.target.kind === 'anthropic' && (chat?.reasoningEffort || s.reasoningEffort) && !['none', 'auto', undefined].includes(chat?.reasoningEffort || s.reasoningEffort) ? { low: 2048, medium: 8000, high: 24000 }[chat?.reasoningEffort || s.reasoningEffort] : undefined
+        });
+        for (let attempt = 0; ; attempt++) {
+          try {
+            for await (const ev of stream()) {
+              if (ev.type === 'text') { if (!firstToken) firstToken = Date.now(); text += ev.delta; sink.text(ev.delta, step); sink.status('writing'); }
+              else if (ev.type === 'reasoning') { if (!firstToken) firstToken = Date.now(); reasoning += ev.delta; sink.reasoning(ev.delta, step); }
+              else if (ev.type === 'tool_call') calls.push(ev);
+              else if (ev.type === 'thinking_block') { thinkingBlocks.push(ev.block); sink.raw({ type: 'thinking_block', block: ev.block, step }); }
+              else if (ev.type === 'usage') {
+                sink.usage(ev, { ms: Date.now() - t0, firstToken: firstToken ? firstToken - t0 : 0 });
+                // El prompt (herramientas + sistema + historial) casi llena la ventana: no queda hueco para responder y la respuesta se corta.
+                if (!ctxWarned && resolved.ctx && ev.input > resolved.ctx * 0.85) {
+                  ctxWarned = true;
+                  sink.notice(`El prompt ocupa ${ev.input.toLocaleString('es-ES')} de ${resolved.ctx.toLocaleString('es-ES')} tokens de contexto: apenas queda espacio para responder y la respuesta se puede cortar. Sube el contexto en Modelos → ajustes del modelo → Contexto, o desactiva herramientas que no uses.`);
+                }
+              }
+              else if (ev.type === 'notice') sink.notice(ev.text);
+            }
+            break;
+          } catch (e) {
+            // Modelos sin visión (p. ej. algunos de OpenRouter) rechazan la petición entera si lleva imágenes:
+            // se repite una vez sin imágenes en lugar de fallar.
+            const noVision = /image input|support(s)? images?|vision|image_url|multimodal/i.test(e.message || '');
+            if (attempt === 0 && noVision && resolved.target.vision !== false && !text && !calls.length && !signal.aborted) {
+              resolved.target.vision = false;
+              sink.notice('Este modelo no admite imágenes; continúo sin enviarle capturas ni imágenes.');
+              continue;
+            }
+            // Contexto desbordado (la estimación se quedó corta): compactar a la fuerza y reintentar una vez
+            if (attempt === 0 && CONTEXT_OVERFLOW.test(e.message || '') && !text && !calls.length && !signal.aborted) {
+              sink.notice('La conversación no cabía en el contexto del modelo; la compacto y reintento.');
+              const compacted = await this.compactIfNeeded({ convo, resolved, toolsSize, signal, sink, chat: depth === 0 ? chat : null, force: true });
+              if (!compacted) for (const m of convo) if (m.role === 'tool' && typeof m.content === 'string' && m.content.length > 2000) m.content = truncate(m.content, 2000);
+              trimmed = this.trimToContext(convo, Math.floor((resolved.ctx || 8192) * 0.75), toolsSize).map(stripPrivate);
+              sink.status('thinking');
+              continue;
+            }
+            throw e;
+          }
+        }
+        finalText = text || finalText;
+        if (!calls.length && !signal.aborted && depth === 0 && this.runs.get(chatId)?.steer.length) { convo.push({ role: 'assistant', content: text }); continue; }
+        // Si dejó un plan (update_plan) con pasos sin terminar y se detuvo sin usar herramientas, no demos la tarea
+        // por acabada en silencio: que la retome ahora mismo, marque el plan como hecho, o diga claramente que está bloqueado.
+        if (!calls.length && !signal.aborted && depth === 0) {
+          const planBlock = sink.blocks.find((b) => b.type === 'plan');
+          const pending = planBlock?.items?.some((it) => it.status !== 'done');
+          if (pending && planNudges < 2) {
+            planNudges++;
+            convo.push({ role: 'assistant', content: text });
+            convo.push({ role: 'user', content: '[Nexo] Tu plan (update_plan) todavía tiene pasos sin marcar como done. Si vas a seguir, hazlo ya usando las herramientas en esta misma respuesta (no digas que lo harás, hazlo). Si ya terminaste de verdad, llama a update_plan marcando todo como done. Si estás bloqueado o necesitas algo del usuario, dilo con claridad.' });
+            sink.status('thinking');
+            continue;
+          }
+        }
+        // Si termina sin llamadas pero escribió un intento de herramienta como texto que no se pudo leer (JSON roto),
+        // avisarlo: así no parece una respuesta normal ni un resultado inventado.
+        if (!calls.length && !signal.aborted && text) {
+          const named = [...new Set([...text.matchAll(/"name"\s*:\s*"([A-Za-z0-9_]+)"/g)].map((m) => m[1]))];
+          // Herramienta real que el selector no envió en este turno: reintentar el turno con todas las herramientas.
+          const hidden = named.filter((n) => !tools.some((t) => t.name === n) && fullTools.some((t) => t.name === n));
+          if (compact && hidden.length && toolNudges < 2) {
+            toolNudges++;
+            needFull = true;
+            convo.push({ role: 'assistant', content: text });
+            convo.push({ role: 'user', content: `[Nexo] Escribiste la llamada a ${hidden.join(', ')} como texto y no se ejecutó. Ahora tienes todas las herramientas: haz la llamada de verdad ya, sin texto previo.` });
+            sink.status('thinking');
+            continue;
+          }
+          const tried = named.filter((n) => tools.some((t) => t.name === n));
+          if (tried.length) sink.notice(`El modelo intentó usar ${tried.join(', ')} escribiendo la llamada como texto, pero no se pudo leer y NO se ejecutó. Repite la petición o usa un modelo con llamadas a herramientas nativas.`);
+          else if (hidden.length) sink.notice(`El modelo intentó usar ${hidden.join(', ')} y no se ejecutó. Repite la petición.`);
+        }
+        if (!calls.length || signal.aborted) { finished = true; break; }
+        convo.push({ role: 'assistant', content: text, tool_calls: calls.map((c) => ({ id: c.id, name: c.name, arguments: c.arguments })), thinking_blocks: thinkingBlocks, reasoning_content: reasoning || undefined });
+        sink.status('tools');
+        const budgetTok = Math.max(2048, (resolved.ctx || 8192) * 0.8 - toolsSize / CHARS_PER_TOKEN - 1024);
+        const results = await this.runToolCalls({ calls, tools, sink, step, signal, mode, allowAlways, chatId, chat, resultCap: Math.max(3000, Math.floor(budgetTok * 0.3 * CHARS_PER_TOKEN)) });
+        // Detector de bucles: la misma llamada con los mismos argumentos una y otra vez (típico de modelos locales)
+        let loopy = 0;
+        for (const c of calls) { const k = callKey(c); const n = (repeats.get(k) || 0) + 1; repeats.set(k, n); loopy = Math.max(loopy, n); }
+        // Barridos: la misma herramienta sobre el mismo objetivo en pasos seguidos, cambiando solo la posición
+        const sk = calls.length === 1 ? sweepKey(calls[0]) : null;
+        sweep = sk && sk === lastSweep ? sweep + 1 : 1; lastSweep = sk;
+        if (sweep >= 8 && loopy < 3) {
+          const lastRes = results[results.length - 1];
+          if (lastRes) lastRes.content += `\n\n[Aviso de Nexo: llevas ${sweep} pasos seguidos con ${calls[0].name} sobre lo mismo cambiando solo la posición. Pide de una vez el rango que necesitas (o usa search_files para encontrar el dato) y responde al usuario.]`;
+          if (sweep >= 14) { convo.push(...results); sink.notice('Detuve un barrido repetitivo: el modelo avanzaba de poco en poco sin terminar.'); step = sink.nextStep(); finished = await this.finalAnswer({ convo, resolved, sink, signal, step, agent, chat }); break; }
+        }
+        if (loopy >= 3) {
+          const last = results[results.length - 1];
+          if (last) last.content += `\n\n[Aviso de Nexo: ya has hecho esta misma llamada ${loopy} veces con los mismos argumentos y el resultado no cambia. No la repitas: usa la información que ya tienes o cambia de estrategia. Si una búsqueda no encuentra nada, el patrón está mal: busca algo más simple (p. ej. solo el nombre de la función) o lee el archivo con read_file.]`;
+          if (loopy >= 5) { convo.push(...results); sink.notice('Detuve un bucle: el modelo repetía la misma acción sin avanzar.'); step = sink.nextStep(); finished = await this.finalAnswer({ convo, resolved, sink, signal, step, agent, chat }); break; }
+        }
+        // El modelo pidió algo que no estaba en el conjunto compacto: el siguiente paso envía todas las herramientas.
+        if (compact && calls.some((c) => !tools.some((t) => t.name === c.name))) needFull = true;
+        convo.push(...results);
+        // tool_search pudo cargar nuevas herramientas MCP
+        if (calls.some((c) => c.name === 'tool_search')) toolsSize = measureTools();
+        step = sink.nextStep();
+      }
+      if (!finished && !signal.aborted) {
+        sink.notice(`Se alcanzó el límite de ${maxSteps} pasos de este agente; resumo lo hecho hasta ahora.`);
+        step = sink.nextStep();
+        await this.finalAnswer({ convo, resolved, sink, signal, step, agent, chat });
+      }
+    } finally {
+      if (resolved.localId) llama.release(resolved.localId);
+    }
+    finalText = finalText || sink.blocks.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+    if (depth === 0 && !signal.aborted) {
+      const hk = await this.runHooks('stop', { chat, result: finalText }).catch(() => []);
+      for (const h of hk) if ((h.out || h.err).trim()) sink.notice(`Hook al terminar: ${truncate((h.out || h.err).trim(), 400)}`);
+    }
+    return { text: finalText, label: resolved.label, ref: resolved.ref };
+  }
+
+  /** Pide al modelo una respuesta final sin herramientas (resumen de lo hecho y lo que falta). */
+  async finalAnswer({ convo, resolved, sink, signal, step, agent, chat }) {
+    const msgs = this.trimToContext([...convo, { role: 'user', content: '[Nexo] No uses más herramientas. Responde ya al usuario: qué has hecho, qué resultados tienes y qué falta. Sé estrictamente honesto: menciona SOLO cambios y resultados que las herramientas confirmaron arriba (si no llegaste a editar ningún archivo o no verificaste, dilo claramente). No inventes salidas de comandos.' }], resolved.ctx || 8192, 0).map(stripPrivate);
+    try {
+      for await (const ev of streamChat(resolved.target, { messages: msgs, tools: [], signal, temperature: chat?.temperature ?? agent.temperature })) {
+        if (ev.type === 'text') { sink.text(ev.delta, step); sink.status('writing'); }
+      }
+      return true;
+    } catch (e) { if (!signal.aborted) sink.notice(`No se pudo obtener la respuesta final: ${e.message}`); return false; }
+  }
+
+  async runToolCalls({ calls, tools, sink, step, signal, mode, allowAlways, chatId, chat, resultCap = 20000 }) {
+    const exec = async (call) => {
+      const tool = tools.find((t) => t.name === call.name);
+      const block = sink.tool({ id: call.id, name: call.name, args: call.arguments, status: 'running', step, risk: tool?.risk, group: tool?.group, server: tool?.server, startedAt: Date.now() });
+      if (!tool) { block.status = 'error'; block.error = `Herramienta desconocida: ${call.name}`; sink.update(); return { role: 'tool', tool_call_id: call.id, name: call.name, content: block.error, isError: true }; }
+      if (needsApproval(tool, mode, allowAlways, this.getSettings().permissions?.overrides)) {
+        block.status = 'awaiting'; sink.update();
+        const decision = await this.requestApproval({ chatId, tool: tool.name, group: tool.group, risk: tool.risk, args: call.arguments, description: tool.description, server: tool.server }, signal);
+        if (decision === 'always') { allowAlways[tool.name] = true; if (chat) { chat.allowAlways = allowAlways; } }
+        if (decision === 'deny' || signal.aborted) {
+          block.status = 'denied'; sink.update();
+          return { role: 'tool', tool_call_id: call.id, name: call.name, content: 'El usuario denegó esta acción. No la repitas; pregunta o propone una alternativa.' };
+        }
+        block.status = 'running'; sink.update();
+      }
+      // hook "antes de herramienta": salir con código 2 bloquea la acción y el motivo se le pasa al modelo
+      const pre = await this.runHooks('before_tool', { tool: tool.name, args: call.arguments, chat }).catch(() => []);
+      const blocked = pre.find((h) => h.code === 2);
+      if (blocked) {
+        const why = (blocked.err || blocked.out || 'sin motivo').trim();
+        block.status = 'denied'; block.error = `Bloqueado por un hook: ${why}`; block.endedAt = Date.now(); sink.update();
+        return { role: 'tool', tool_call_id: call.id, name: call.name, content: `Acción bloqueada por un hook del usuario: ${why}`, isError: true };
+      }
+      const messageId = this.runs.get(chatId)?.message?.id;
+      try {
+        const res = await tool.run(call.arguments || {}, { signal, sink: block, maxChars: resultCap, emitPlan: (items) => sink.plan(items), onComputerUse: () => this.emit('computer-use', { chatId }), checkpoint: (p) => this.checkpoint(chatId, messageId, p) });
+        let text = typeof res === 'string' ? res : (res?.text ?? JSON.stringify(res));
+        const post = await this.runHooks('after_tool', { tool: tool.name, args: call.arguments, result: text, chat }).catch(() => []);
+        for (const h of post) if (h.out.trim()) text += `\n\n[hook] ${truncate(h.out.trim(), 4000)}`;
+        // Un solo resultado no puede comerse el contexto: máx. ~30% del espacio libre del modelo
+        const cap = resultCap;
+        if (text.length > cap) {
+          const tail = Math.min(800, Math.floor(cap * 0.2));
+          text = `${text.slice(0, cap - tail)}\n\n[… ${text.length - cap} caracteres omitidos porque no caben en el contexto del modelo. Pide la parte que necesites (read_file con offset/limit, search_files con un patrón, o filtra la salida del comando) …]\n\n${text.slice(-tail)}`;
+        }
+        const images = typeof res === 'object' && res?.images ? res.images : [];
+        block.result = truncate(text, 60000);
+        block.status = res?.isError ? 'error' : 'done';
+        if (res?.isError) block.error = truncate(text, 500);
+        block.images = images.map((im) => ({ file: saveAttachment(chatId, { name: `tool.${im.mime.includes('png') ? 'png' : 'jpg'}`, data: im.data, mime: im.mime }), mime: im.mime }));
+        block.endedAt = Date.now();
+        sink.update();
+        return { role: 'tool', tool_call_id: call.id, name: call.name, content: block.result, images, isError: !!res?.isError };
+      } catch (e) {
+        block.status = 'error'; block.error = e.message || String(e); block.endedAt = Date.now();
+        sink.update();
+        return { role: 'tool', tool_call_id: call.id, name: call.name, content: `Error: ${block.error}`, isError: true };
+      }
+    };
+    // Las delegaciones pueden ejecutarse en paralelo si los modelos caben a la vez
+    const delegations = calls.filter((c) => c.name === 'delegate_task');
+    const others = calls.filter((c) => c.name !== 'delegate_task');
+    const results = [];
+    for (const c of others) { if (signal.aborted) break; results.push(await exec(c)); }
+    if (delegations.length) {
+      const parallel = delegations.length > 1 && await this.canRunConcurrently(delegations.map((d) => d.arguments?.model || getAgent(d.arguments?.agent)?.model || null));
+      if (parallel) results.push(...await Promise.all(delegations.map(exec)));
+      else for (const c of delegations) { if (signal.aborted) break; results.push(await exec(c)); }
+    }
+    // mantener el orden original de llamadas
+    return calls.map((c) => results.find((r) => r.tool_call_id === c.id)).filter(Boolean);
+  }
+
+  async canRunConcurrently(refs) {
+    const locals = await this.localModels();
+    const items = [];
+    for (const r of refs) {
+      if (!r || !r.startsWith('local:')) continue;
+      const m = locals.find((x) => `local:${x.id}` === r);
+      if (m && !items.find((i) => i.id === m.id)) items.push({ id: m.id, meta: m.meta, fileSize: m.size, ctx: m.settings?.ctx || this.getSettings().ctx || 8192 });
+    }
+    if (items.length <= 1) return true;
+    const hw = await this.getHardware();
+    return planMulti(items, staticBudget(hw)).fitsAll;
+  }
+
+  async delegate({ agent: agentId, task, model }, { chatId, parentRef, sink, signal, depth, chat }) {
+    const agent = getAgent(agentId);
+    const ref = model || agent.model || parentRef;
+    const sub = { agentId: agent.id, agentName: agent.name, ref, task, blocks: [], status: 'running' };
+    sink.sub = sub;
+    const subSink = this.makeSink(sub.blocks, () => this.emitCurrent(chatId), { onModel: (r) => { sub.modelLabel = r.label; } });
+    try {
+      if (agent.runner === 'opencode') {
+        const text = await this.openCodeTurn({ chat, prompt: task, sink: subSink, signal, useSession: false, modelOverride: model && !model.includes(':') ? model : undefined });
+        sub.status = 'done';
+        return `Resultado de OpenCode:\n\n${text || '(sin texto)'}`;
+      }
+      const r = await this.agentLoop({ chatId, agent, ref, messages: [{ role: 'user', content: task }], sink: subSink, signal, depth: depth + 1, chat });
+      sub.status = 'done';
+      return `Resultado de ${agent.name} (${r.label}):\n\n${r.text || '(sin texto)'}`;
+    } catch (e) {
+      sub.status = 'error'; sub.error = e.message;
+      throw e;
+    } finally { this.emitCurrent(chatId); }
+  }
+
+  emitCurrent(chatId) {
+    const r = this.runs.get(chatId);
+    if (r?.message) this.emitMessage(chatId, r.message);
+  }
+
+  makeSink(blocks, onChange, { onModel, onUsage, onStatus } = {}) {
+    let step = -1;
+    const last = () => blocks[blocks.length - 1];
+    const sink = {
+      blocks,
+      nextStep: () => ++step,
+      text: (d, st) => { const b = last(); if (b && b.type === 'text' && b.step === st) b.text += d; else blocks.push({ type: 'text', text: d, step: st }); onChange(); },
+      reasoning: (d, st) => { const b = last(); if (b && b.type === 'reasoning' && b.step === st) b.text += d; else blocks.push({ type: 'reasoning', text: d, step: st, startedAt: Date.now() }); onChange(); },
+      tool: (b) => { blocks.push({ type: 'tool', ...b }); onChange(); return blocks[blocks.length - 1]; },
+      raw: (b) => { blocks.push(b); },
+      plan: (items) => { const p = blocks.find((b) => b.type === 'plan'); if (p) p.items = items; else blocks.push({ type: 'plan', items }); onChange(); },
+      notice: (text) => { blocks.push({ type: 'notice', text }); onChange(); },
+      userNote: (text) => { blocks.push({ type: 'user', text }); onChange(); },
+      stage: (label, extra) => { blocks.push({ type: 'stage', label, ...extra }); onChange(); },
+      update: () => onChange(),
+      status: (s) => { onStatus?.(s); onChange(); },
+      setModel: (r) => { onModel?.(r); onChange(); },
+      usage: (u, t) => { onUsage?.(u, t); }
+    };
+    return sink;
+  }
+
+  /** Envía un mensaje del usuario y genera la respuesta según el modo del chat. */
+  async send(chatId, { text, attachments = [], regenerateFrom } = {}) {
+    const chat = getChat(chatId);
+    if (!chat) throw new Error('Chat no encontrado');
+    if (this.runs.has(chatId)) throw new Error('Ya hay una respuesta en curso en este chat');
+    if (regenerateFrom !== undefined) {
+      chat.messages = chat.messages.slice(0, regenerateFrom);
+      if (chat.summary && chat.summary.upto > chat.messages.length - 1) delete chat.summary;
+    } else {
+      const saved = attachments.map((a) => {
+        if (a.kind === 'image' && a.data) return { kind: 'image', name: a.name, mime: a.mime, file: saveAttachment(chatId, a) };
+        if (a.kind === 'text') return { kind: 'text', name: a.name, text: a.text, size: a.size };
+        return { kind: 'file', name: a.name, path: a.path, size: a.size };
+      });
+      const sk = /^\/([a-z0-9][a-z0-9-]*)(?:\s+([\s\S]*))?$/i.exec((text || '').trim());
+      const skillId = sk && getSkill(sk[1]) ? getSkill(sk[1]).id : null; // /nombre-de-skill lanza esa skill
+      chat.messages.push({ id: uid('m_'), role: 'user', content: text || '', attachments: saved, createdAt: Date.now(), ...(skillId ? { skillInvoke: skillId, skillArgs: (sk[2] || '').trim() } : {}) });
+      if (chat.title === 'Nuevo chat' && text) chat.title = text.replace(/\s+/g, ' ').trim().slice(0, 60) + (text.length > 60 ? '…' : '');
+    }
+    const agent = getAgent(chat.agentId);
+    const message = { id: uid('m_'), role: 'assistant', agentId: agent.id, agentName: agent.name, createdAt: Date.now(), status: 'starting' };
+    chat.messages.push(message);
+    saveChat(chat);
+    this.emit('chat-meta', { chatId, title: chat.title });
+    const controller = new AbortController();
+    this.runs.set(chatId, { controller, message, steer: [], opencode: agent.runner === 'opencode' });
+    this.emitMessage(chatId, message, true);
+    const t0 = Date.now();
+    try {
+      const history = this.historyToMessages(chat, { uptoIndex: chat.messages.length - 1 });
+      if (agent.runner === 'opencode') await this.runOpenCode({ chat, agent, message, controller });
+      else if (chat.mode === 'compare' && chat.compareModels?.length > 1) await this.runCompare({ chat, agent, message, history, controller });
+      else if (chat.mode === 'pipeline' && chat.pipeline?.length) await this.runPipeline({ chat, agent, message, history, controller });
+      else await this.runSingle({ chat, agent, message, history, controller });
+      message.status = controller.signal.aborted ? 'stopped' : 'done';
+    } catch (e) {
+      if (controller.signal.aborted || e.name === 'AbortError') message.status = 'stopped';
+      else { message.status = 'error'; message.error = e.message || String(e); }
+    } finally {
+      message.durationMs = Date.now() - t0;
+      this.runs.delete(chatId);
+      if (message._pending) { clearTimeout(message._pending); message._pending = null; }
+      delete message._lastEmit;
+      try { await this.gitAutoCommit(chat, message); } catch { /* el commit es un extra */ }
+      saveChat(chat, true);
+      this.emitMessage(chatId, message, true);
+      this.emit('run-end', { chatId, message });
+    }
+    return message;
+  }
+
+
+  /** Git automático (estilo Aider): si el proyecto es un repositorio, confirma los archivos que tocó el agente con un mensaje claro. Opcional en Ajustes. */
+  async gitAutoCommit(chat, message) {
+    const s = this.getSettings();
+    if (!s.autoGit || !message.changedFiles?.length || message.status === 'error') return;
+    const cwd = this.workspaceFor(chat);
+    const top = await runCmd('git', ['rev-parse', '--show-toplevel'], { cwd });
+    if (!top.ok) return;
+    const root = path.resolve(top.stdout.trim());
+    const files = message.changedFiles.filter((f) => path.resolve(f).startsWith(root));
+    if (!files.length) return;
+    if (s.autoGitBranch && !chat.gitBranch) {
+      const name = `nexo/${new Date().toISOString().slice(0, 10)}-${chat.id.slice(-5)}`;
+      const sw = await runCmd('git', ['switch', '-c', name], { cwd: root });
+      if (sw.ok) { chat.gitBranch = name; saveChat(chat); }
+    }
+    await runCmd('git', ['add', '--', ...files], { cwd: root });
+    const user = [...chat.messages].reverse().find((m) => m.role === 'user' && !m.rewound);
+    const title = String(user?.content || 'cambios del agente').replace(/\s+/g, ' ').trim().slice(0, 68);
+    const c = await runCmd('git', ['-c', 'user.name=Nexo AI', '-c', 'user.email=nexo@localhost', 'commit', '-m', `nexo: ${title}`, '--', ...files], { cwd: root });
+    if (c.ok) {
+      const h = await runCmd('git', ['rev-parse', '--short', 'HEAD'], { cwd: root });
+      message.gitCommit = h.stdout.trim(); message.gitRoot = root;
+    }
+  }
+
+  async runSingle({ chat, agent, message, history, controller }) {
+    message.blocks = [];
+    const ref = chat.model || agent.model || null;
+    const sink = this.makeSink(message.blocks, () => this.emitMessage(chat.id, message), {
+      onModel: (r) => { message.model = r.ref; message.modelName = r.label; },
+      onUsage: (u, t) => { message.usage = accumulateUsage(message.usage, u, t); },
+      onStatus: (s) => { message.status = s; }
+    });
+    const run = this.runs.get(chat.id); if (run) run.sink = sink;
+    await this.agentLoop({ chatId: chat.id, agent, ref, messages: history, sink, signal: controller.signal, chat });
+  }
+
+  /** Envía el mensaje del usuario a OpenCode (terminal) y muestra sus pasos en el chat. */
+  async runOpenCode({ chat, message, controller }) {
+    message.blocks = [];
+    const sink = this.makeSink(message.blocks, () => this.emitMessage(chat.id, message), {
+      onModel: (r) => { message.model = r.ref; message.modelName = r.label; },
+      onUsage: (u) => { message.usage = accumulateUsage(message.usage, u, { ms: 0 }); }, onStatus: (st) => { message.status = st; }
+    });
+    const user = chat.messages[chat.messages.length - 2];
+    let prompt = user?.content || '';
+    const files = [];
+    for (const a of user?.attachments || []) {
+      if (a.kind === 'image' && a.file) files.push(a.file);
+      else if (a.kind === 'text') prompt += `\n\n--- ${a.name} ---\n${truncate(a.text || '', 60000)}`;
+      else if (a.path) files.push(a.path);
+    }
+    const run = this.runs.get(chat.id); if (run) run.sink = sink;
+    const original = prompt;
+    for (;;) {
+      const inner = new AbortController();
+      const link = () => inner.abort();
+      controller.signal.addEventListener('abort', link, { once: true });
+      if (run) { run.inner = inner; run.redirect = false; }
+      try { await this.openCodeTurn({ chat, prompt, files, sink, signal: inner.signal, useSession: true }); }
+      catch (e) { if (!(run?.redirect && !controller.signal.aborted)) throw e; }
+      finally { controller.signal.removeEventListener('abort', link); }
+      if (controller.signal.aborted || !run?.redirect) break;
+      const extra = run.steer.splice(0);
+      prompt = ['Tarea original: ' + original, 'Mientras trabajabas, el usuario te da una instrucción nueva:', extra.join('\n'), 'Continúa desde donde ibas y cumple también lo nuevo (si cambia el objetivo, adáptate). Si el navegador aparece vacío, vuelve a abrir la página en la que estabas.'].join('\n\n');
+      files.length = 0;
+    }
+  }
+
+  /**
+   * Un turno de OpenCode. Modelo: cualquiera de OpenCode (nube o proveedores propios), el elegido en
+   * Ajustes, o el modelo LOCAL de Nexo ("nexo:local", que se le pasa como proveedor compatible con OpenAI).
+   */
+  async openCodeTurn({ chat, prompt, files = [], sink, signal, useSession = true, modelOverride }) {
+    const s = this.getSettings();
+    const oc = s.opencode || {};
+    const choice = modelOverride ?? chat?.opencodeModel ?? oc.model ?? '';
+    let model = choice || undefined, local = null, localId = null;
+    if (choice === 'nexo:local') {
+      const ref = chat?.model || s.defaultModel || await this.defaultModelRef();
+      if (!ref?.startsWith('local:')) throw new Error('Para usar el modelo de Nexo con OpenCode elige un modelo LOCAL en el selector de modelos del chat.');
+      sink.status('loading-model');
+      const r = await this.resolveTarget(ref);
+      local = { baseUrl: r.target.baseUrl, model: 'local', label: r.label, ctx: r.ctx };
+      model = 'nexo/local';
+      localId = r.localId;
+      llama.acquire(localId);
+    }
+    // "Predeterminado" = lo mismo que tienes elegido en OpenCode (último modelo usado y su nivel de pensamiento)
+    const ocState = opencode.readState();
+    if (!model && ocState.last) model = ocState.last;
+    const chosen = chat?.opencodeVariant;
+    const variant = choice === 'nexo:local' ? null : (chosen && chosen !== 'auto' ? chosen : (model ? ocState.variants[model] || null : null));
+    sink.setModel({ ref: `opencode:${model || 'predeterminado'}`, label: `OpenCode · ${choice === 'nexo:local' ? `${local.label} (local de Nexo)` : (model || 'modelo predeterminado de OpenCode')}${variant ? ` · ${variant}` : ''}` });
+    sink.status('thinking');
+    const mode = chat?.permissionMode || s.permissions?.mode || 'smart';
+    const steps = new Map();
+    const stepOf = (id) => { const k = id || '_'; if (!steps.has(k)) steps.set(k, sink.nextStep()); return steps.get(k); };
+    const toolBlocks = new Map();
+    try {
+      const r = await opencode.runPrompt({
+        prompt, files, model, variant, local, custom: oc.path, rea: oc.rea === true,
+        sessionId: useSession ? chat?.opencodeSession || undefined : undefined,
+        dir: this.workspaceFor(chat),
+        auto: mode === 'full' || oc.autoApprove === true,
+        signal,
+        onEvent: (ev) => {
+          if (ev.type === 'session') { if (useSession && chat) chat.opencodeSession = ev.id; }
+          else if (ev.type === 'text') { sink.text(ev.delta, stepOf(ev.step)); sink.status('writing'); }
+          else if (ev.type === 'reasoning') sink.reasoning(ev.delta, stepOf(ev.step));
+          else if (ev.type === 'tool') {
+            const status = ev.status === 'completed' ? 'done' : ev.status === 'error' ? 'error' : 'running';
+            const result = typeof ev.output === 'string' ? ev.output : ev.output ? JSON.stringify(ev.output, null, 2) : '';
+            let b = toolBlocks.get(ev.id);
+            if (!b) { b = sink.tool({ id: ev.id, name: `oc:${ev.name}`, args: ev.input || {}, status, step: stepOf(ev.step), group: 'opencode', startedAt: ev.time?.start || Date.now() }); toolBlocks.set(ev.id, b); }
+            Object.assign(b, { status, args: ev.input || b.args, result: truncate(result, 60000), error: ev.error ? String(ev.error) : undefined, title: ev.title, endedAt: ev.time?.end });
+            sink.status('tools');
+            sink.update();
+          } else if (ev.type === 'usage') sink.usage({ input: ev.input, output: ev.output }, { ms: 0 });
+        }
+      });
+      if (useSession && chat && r.session) chat.opencodeSession = r.session;
+      return r.text;
+    } finally {
+      if (localId) llama.release(localId);
+    }
+  }
+
+  async runCompare({ chat, agent, message, history, controller }) {
+    message.variants = chat.compareModels.map((ref) => ({ ref, blocks: [], status: 'waiting' }));
+    const runOne = async (v, i) => {
+      v.status = 'starting';
+      const sink = this.makeSink(v.blocks, () => this.emitMessage(chat.id, message), {
+        onModel: (r) => { v.modelName = r.label; }, onUsage: (u, t) => { v.usage = accumulateUsage(v.usage, u, t); }, onStatus: (s) => { v.status = s; }
+      });
+      try {
+        await this.agentLoop({ chatId: chat.id, agent, ref: v.ref, messages: this.historyToMessages(chat, { variant: i, uptoIndex: chat.messages.length - 1 }), sink, signal: controller.signal, chat });
+        v.status = 'done';
+      } catch (e) { v.status = 'error'; v.error = e.message; }
+      this.emitMessage(chat.id, message);
+    };
+    const concurrent = await this.canRunConcurrently(chat.compareModels);
+    message.strategy = concurrent ? 'concurrent' : 'sequential';
+    if (concurrent) await Promise.all(message.variants.map(runOne));
+    else for (let i = 0; i < message.variants.length; i++) { if (controller.signal.aborted) break; await runOne(message.variants[i], i); }
+  }
+
+  async runPipeline({ chat, agent, message, history, controller }) {
+    message.blocks = [];
+    const stages = chat.pipeline;
+    const sink = this.makeSink(message.blocks, () => this.emitMessage(chat.id, message), {
+      onUsage: (u, t) => { message.usage = accumulateUsage(message.usage, u, t); }, onStatus: (s) => { message.status = s; }
+    });
+    let previous = '';
+    const userTask = history[history.length - 1];
+    for (let i = 0; i < stages.length; i++) {
+      if (controller.signal.aborted) break;
+      const st = stages[i];
+      const stAgent = st.agentId ? getAgent(st.agentId) : agent;
+      const ref = st.model || chat.model || stAgent.model;
+      sink.stage(st.label || `Etapa ${i + 1}`, { index: i, total: stages.length, ref, modelName: await this.modelLabel(ref), agentName: stAgent.name });
+      const msgs = [...history.slice(0, -1)];
+      const taskText = typeof userTask.content === 'string' ? userTask.content : userTask.content.find((c) => c.type === 'text')?.text || '';
+      const content = i === 0 ? userTask.content : `Tarea original del usuario:\n${taskText}\n\nResultado de la etapa anterior:\n${previous}`;
+      msgs.push({ role: 'user', content });
+      const r = await this.agentLoop({ chatId: chat.id, agent: stAgent, ref, messages: msgs, sink, signal: controller.signal, stage: { index: i, total: stages.length, label: st.label || `Etapa ${i + 1}`, instruction: st.instruction }, chat });
+      previous = r.text;
+      message.modelName = stages.length + ' modelos';
+    }
+  }
+}
+
+function accumulateUsage(prev = {}, u, t) {
+  const raw = u.tps || (u.output && t.ms ? u.output / ((t.ms - (t.firstToken || 0)) / 1000) : prev.tps);
+  return {
+    input: (prev.input || 0) + (u.input || 0),
+    output: (prev.output || 0) + (u.output || 0),
+    tps: raw ? Math.round(raw * 10) / 10 : undefined,
+    firstToken: prev.firstToken || t.firstToken
+  };
+}
