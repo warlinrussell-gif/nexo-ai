@@ -632,7 +632,7 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false, spellcheck: true }
   });
   browser.attach(win);
-  setBrowserEngine(getSettings().browser?.engine);
+  try { setBrowserEngine(getSettings().browser?.engine); } catch (e) { console.error("motor:", e.message); }
   startExtBridge();
   try { plugins.syncPlugins(); } catch (e) { console.error('plugins:', e.message); }
   win.loadFile(RENDERER);
@@ -803,7 +803,8 @@ app.whenReady().then(async () => {
   });
   session.defaultSession.setPermissionRequestHandler((wc, permission, cb) => cb(['media', 'clipboard-read', 'clipboard-sanitized-write', 'notifications', 'fullscreen'].includes(permission)));
   session.defaultSession.setPermissionCheckHandler((wc, permission) => ['media', 'clipboard-read', 'clipboard-sanitized-write', 'notifications'].includes(permission));
-  if (paths.loadLocation()) await initCore();
+  if (!paths.loadLocation()) { try { paths.setDataDir(paths.defaultDataDir()); } catch (e) { console.error("datos:", e.message); } }
+  if (paths.isConfigured()) await initCore();
   try {
     scheduler.setRunner(async (job) => {
       const ag = agents.getAgent(job.agentId);
